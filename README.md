@@ -6,11 +6,11 @@
 
 ## 対応デバイス
 
-| デバイス | チップ | プロトコル | 状態 |
-|---|---|---|---|
-| New 3DS XL用キャプチャボード（3dscapture.com「N3DSXL」） | FTDI FT600（D3XX） | `3DSCapture_FTD3`移植 | 実機動作確認済み |
-| DS用キャプチャボード | FTDI FT232H + Lattice FPGA | `DSCapture_FTD2`移植 | 実機動作確認済み |
-| 3DS LL用キャプチャボード「LL-SPA3」（non-standard.com） | Cypress FX2LP | `Optimize_3DS`移植（CyUSB.NET経由） | 実機動作確認済み |
+| デバイス | チップ | プロトコル |
+|---|---|---|
+| New 3DS XL用キャプチャボード（3dscapture.com「N3DSXL」） | FTDI FT600（D3XX） | `3DSCapture_FTD3`移植 |
+| DS用キャプチャボード | FTDI FT232H + Lattice FPGA | `DSCapture_FTD2`移植 |
+| 3DS LL用キャプチャボード「LL-SPA3」（non-standard.com） | Cypress FX2LP | `Optimize_3DS`移植（CyUSB.NET経由） |
 
 画面サイズ: 3DSは上400x240/下320x240、DSは256x192が上下2枚。2Dキャプチャのみ対応しています。
 
