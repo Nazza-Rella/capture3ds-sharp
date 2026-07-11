@@ -9,7 +9,7 @@
     <RootNamespace>Capture3DS</RootNamespace>
     <Nullable>disable</Nullable>
     <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
-    <Description>3DS capture-board reader for N3DSXL(FTD3), DS(FTD2) and LL-SPA3(CyUSB). Ports of MIT-licensed ponkan-python and cc3dsfs.</Description>
+    <Description>3DS capture-board reader for N3DSXL(FTD3), DS(FTD2) and LL-SPA3(CyUSB). Ports of MIT-licensed cc3dsfs.</Description>
     <!-- PDB経由でローカルのビルドパス(ユーザー名等)がDLLに残らないようにする -->
     <PathMap>$(MSBuildProjectDirectory)=/_/Capture3DS</PathMap>
   </PropertyGroup>

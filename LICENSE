@@ -23,12 +23,9 @@ SOFTWARE.
 ---
 
 This project is a C# port of protocol implementations from the following
-MIT-licensed projects:
+MIT-licensed project:
 
 - cc3dsfs (https://github.com/Lorenzooone/cc3dsfs)
   Copyright (c) Lorenzooone
   The capture protocols (FTD3 / FTD2 / Optimize Cypress) and the firmware
   binaries bundled under firmware/ originate from this project.
-
-- ponkan-python (https://github.com/niart120/ponkan-python)
-  Copyright (c) niart120

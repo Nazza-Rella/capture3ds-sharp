@@ -102,7 +102,6 @@ MIT License。[LICENSE](LICENSE)を参照してください。
 
 - [cc3dsfs](https://github.com/Lorenzooone/cc3dsfs)（MIT）: キャプチャ
   プロトコルおよび`firmware/`以下のファームウェア
-- [ponkan-python](https://github.com/niart120/ponkan-python)（MIT）
 
 任天堂、3dscapture.com、non-standard.com、FTDI、Infineon/Cypressとは
 一切関係ありません。
