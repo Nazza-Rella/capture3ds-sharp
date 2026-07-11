@@ -1,54 +1,53 @@
 # capture3ds-sharp
 
-A C# (.NET Framework 4.8) library that reads video frames directly from
-3DS / DS capture boards over USB, without running the official viewer
-applications. The capture protocols are C# ports of the MIT-licensed
-[cc3dsfs](https://github.com/Lorenzooone/cc3dsfs), following the approach of
-[ponkan-python](https://github.com/niart120/ponkan-python).
+3DS / DS キャプチャボードの映像を、純正ビューアを起動せずに USB から直接読み取る
+C# (.NET Framework 4.8) ライブラリです。キャプチャプロトコルは MIT ライセンスの
+[cc3dsfs](https://github.com/Lorenzooone/cc3dsfs) を C# に移植したもので、
+[ponkan-python](https://github.com/niart120/ponkan-python) の方針に倣っています。
 
-Frames are returned at native screen resolutions as RGB8 buffers
-(top / bottom screens separately), with helpers for a stacked mosaic and a
-1280x720 letterbox canvas.
+フレームは実解像度の RGB8 バッファ(上画面・下画面を別々に)で取得でき、
+上下を縦に並べたモザイク画像や 1280x720 レターボックス画像への変換ヘルパーも
+用意しています。
 
-## Current Scope
+## 対応デバイス
 
-| Device | Chip | Protocol | Status |
+| デバイス | チップ | プロトコル | 状態 |
 |---|---|---|---|
-| New 3DS XL capture board (3dscapture.com "N3DSXL") | FTDI FT600 (D3XX) | `3DSCapture_FTD3` port | Verified on hardware |
-| DS capture board | FTDI FT232H + Lattice FPGA | `DSCapture_FTD2` port | Verified on hardware |
-| 3DS LL capture board "LL-SPA3" (non-standard.com) | Cypress FX2LP | `Optimize_3DS` port via CyUSB.NET | Verified on hardware |
+| New 3DS XL 用キャプチャボード (3dscapture.com "N3DSXL") | FTDI FT600 (D3XX) | `3DSCapture_FTD3` 移植 | 実機動作確認済み |
+| DS 用キャプチャボード | FTDI FT232H + Lattice FPGA | `DSCapture_FTD2` 移植 | 実機動作確認済み |
+| 3DS LL 用キャプチャボード「LL-SPA3」(non-standard.com) | Cypress FX2LP | `Optimize_3DS` 移植 (CyUSB.NET 経由) | 実機動作確認済み |
 
-Screen sizes: 3DS top 400x240 / bottom 320x240, DS 256x192 x2.
-Only 2D capture is implemented.
+画面サイズ: 3DS は上 400x240 / 下 320x240、DS は 256x192 が上下 2 枚。
+2D キャプチャのみ対応しています。
 
-## Building
+## ビルド方法
 
-Prerequisites: Windows, .NET Framework 4.8 developer pack.
+前提: Windows、.NET Framework 4.8 developer pack。
 
-Two third-party components are **not** included in this repository for
-licensing reasons and must be placed manually before building:
+ライセンス上の理由で、次の 2 つのサードパーティ製コンポーネントは本リポジトリに
+含めていません。ビルド前に各自で配置してください。
 
-1. **CyUSB.dll** (LL-SPA3 backend) — clone
-   [kategray/CyUSB](https://github.com/kategray/CyUSB) into `external/CyUSB`
-   and build `library/c_sharp` so that the assembly exists at
-   `external/CyUSB/library/c_sharp/lib/CyUSB.dll`.
-   (Cypress Software License; its source cannot be redistributed here.)
-2. **FTDI native DLLs** — download from [FTDI](https://ftdichip.com/) and place
-   into `native/`:
-   - `native/FTD3XX.dll` (D3XX, for N3DSXL)
-   - `native/ftd2xx.dll` (D2XX, for the DS capture board)
+1. **CyUSB.dll**(LL-SPA3 用)—
+   [kategray/CyUSB](https://github.com/kategray/CyUSB) を `external/CyUSB` に
+   clone し、`library/c_sharp` をビルドして
+   `external/CyUSB/library/c_sharp/lib/CyUSB.dll` にアセンブリが置かれる状態に
+   してください。(Cypress Software License のためソースを再配布できません)
+2. **FTDI ネイティブ DLL** — [FTDI](https://ftdichip.com/) から入手して
+   `native/` に配置してください。
+   - `native/FTD3XX.dll`(D3XX、N3DSXL 用)
+   - `native/ftd2xx.dll`(D2XX、DS キャプチャボード用)
 
-Then:
+配置後、次でビルドできます。
 
 ```
 dotnet build src/Capture3DS.sln -c Release
 ```
 
-The firmware binaries under `firmware/` (DS FPGA bitstreams and the Optimize
-FX2 firmware) originate from the MIT-licensed cc3dsfs repository and are
-embedded into the assembly at build time.
+`firmware/` 以下のファームウェア(DS 用 FPGA ビットストリームと Optimize 用
+FX2 ファームウェア)は MIT ライセンスの cc3dsfs リポジトリ由来で、ビルド時に
+アセンブリへ埋め込まれます。
 
-## Usage
+## 使い方
 
 ```csharp
 using Capture3DS;
@@ -59,53 +58,52 @@ using (var dev = Capture3DSApi.Open(devices[0]))
     dev.Connect();
     Capture3DSFrame frame = dev.ReadFrame();
 
-    // frame.Top / frame.Bottom : RGB8, row-major, 3 bytes per pixel
+    // frame.Top / frame.Bottom : RGB8、行優先、1px = 3byte
     byte[] mosaic = frame.ToMosaic(out int w, out int h);
     byte[] canvas = frame.ToLetterbox720(); // 1280x720 RGB8
 }
 ```
 
-`ListDevices()` silently skips backends whose native DLL is missing, so the
-library still works when only some of the DLLs above are installed.
+`ListDevices()` はネイティブ DLL が見つからないバックエンドを黙ってスキップする
+ので、上記 DLL の一部しか無い環境でもそのまま動作します。
 
-## Command Line Tools
+## コマンドラインツール
 
-`CaptureProbe.exe [outputDir] [frameCount]` — enumerates devices, connects to
-the first one and saves PNG frames (top / bottom / 720p letterbox).
+`CaptureProbe.exe [出力フォルダ] [フレーム数]` — デバイスを列挙し、最初の 1 台に
+接続して PNG(上画面 / 下画面 / 720p レターボックス)を保存します。
 
-Diagnostic modes:
+診断モード:
 
-- `--cypress` — raw enumeration of Cypress FX2 devices (VID/PID/bcdDevice)
-- `--ftd3raw` — unfiltered FTD3 device dump (driver / exclusive-open triage)
-- `--ftd3sizes [n]` — transfer-length statistics for frame alignment triage
-- `--ftd3stream <dir> <n>` — high-rate stream test, saves misaligned frames
-- `--ftd3verify <dir> <n>` — production `ReadFrame` verification under load
+- `--cypress` — Cypress FX2 デバイスの生列挙(VID/PID/bcdDevice)
+- `--ftd3raw` — FTD3 デバイスのフィルタ前ダンプ(ドライバ / 排他オープンの切り分け)
+- `--ftd3sizes [n]` — 転送長の統計(フレーム整列の切り分け)
+- `--ftd3stream <dir> <n>` — 高速連続読みテスト、ずれたフレームを保存
+- `--ftd3verify <dir> <n>` — 実運用相当の負荷での `ReadFrame` 検証
 
-## Notes
+## 注意事項
 
-- **Close the official viewers first.** The capture boards are exclusive-open
-  devices; while `3ds_capture.exe` or `n3DS_view.exe` is running the device
-  either disappears from enumeration or fails to connect.
-- **N3DSXL** requires the FTDI D3XX driver (the one used by the official
-  3ds_capture software).
-- **LL-SPA3** works with the vendor's stock `cyusb3` driver — no driver
-  replacement (Zadig/WinUSB) and no manual firmware flashing are needed. When
-  the board enumerates as a blank FX2 (`04B4:8613`), the library uploads the
-  cc3dsfs Optimize firmware itself and the device renumerates to `04B4:1004`.
-- **LL-SPA3 product key** is optional. If present it is read from the
-  `n3DS_view` EEPROM cache (`%APPDATA%\non-standard.com\VROM_*.bin`) or from a
-  `llspa3_key.txt` file next to the executable. The key is only folded into
-  the capture setup buffer and is never logged.
+- **純正ビューアは先に終了してください。** キャプチャボードは排他オープンの
+  デバイスなので、`3ds_capture.exe` や `n3DS_view.exe` の起動中は列挙から
+  消えるか、接続に失敗します。
+- **N3DSXL** には FTDI D3XX ドライバ(純正の 3ds_capture が使うもの)が必要です。
+- **LL-SPA3** はメーカー純正の `cyusb3` ドライバのままで動きます。Zadig/WinUSB
+  へのドライバ入れ替えも、手動でのファームウェア書き込みも不要です。素の FX2
+  (`04B4:8613`)として認識されている場合は、ライブラリが cc3dsfs の Optimize
+  ファームウェアを自動で転送し、デバイスは `04B4:1004` として再列挙されます。
+- **LL-SPA3 のプロダクトキー**は任意です。存在する場合は `n3DS_view` の
+  EEPROM キャッシュ(`%APPDATA%\non-standard.com\VROM_*.bin`)か、実行ファイルの
+  隣に置いた `llspa3_key.txt` から読み込みます。キーはキャプチャ開始用の
+  セットアップバッファに畳み込まれるだけで、ログ等には出力されません。
 
-## License and Attribution
+## ライセンスと出典
 
-MIT License. See [LICENSE](LICENSE).
+MIT License。[LICENSE](LICENSE) を参照してください。
 
-This project ports protocol implementations from:
+本プロジェクトは次のプロジェクトからプロトコル実装を移植しています。
 
-- [cc3dsfs](https://github.com/Lorenzooone/cc3dsfs) (MIT) — capture protocols
-  and the firmware binaries under `firmware/`
+- [cc3dsfs](https://github.com/Lorenzooone/cc3dsfs) (MIT) — キャプチャ
+  プロトコルおよび `firmware/` 以下のファームウェア
 - [ponkan-python](https://github.com/niart120/ponkan-python) (MIT)
 
-Not affiliated with Nintendo, 3dscapture.com, non-standard.com, FTDI or
-Infineon/Cypress.
+任天堂、3dscapture.com、non-standard.com、FTDI、Infineon/Cypress とは
+一切関係ありません。
