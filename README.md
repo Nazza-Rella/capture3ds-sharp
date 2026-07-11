@@ -1,12 +1,8 @@
 # capture3ds-sharp
 
-3DS/DSキャプチャボードの映像を、純正ビューアを起動せずにUSBから直接読み取る
-C#（.NET Framework 4.8）ライブラリです。キャプチャプロトコルはMITライセンスの
-[cc3dsfs](https://github.com/Lorenzooone/cc3dsfs)をC#に移植したものです。
+3DS/DSキャプチャボードの映像を、純正ビューアを起動せずにUSBから直接読み取るC#（.NET Framework 4.8）ライブラリです。キャプチャプロトコルはMITライセンスの[cc3dsfs](https://github.com/Lorenzooone/cc3dsfs)をC#に移植したものです。
 
-フレームは実解像度のRGB8バッファ（上画面・下画面を別々に）で取得でき、
-上下を縦に並べたモザイク画像や1280x720レターボックス画像への変換ヘルパーも
-用意しています。
+フレームは実解像度のRGB8バッファ（上画面・下画面を別々に）で取得でき、上下を縦に並べたモザイク画像や1280x720レターボックス画像への変換ヘルパーも用意しています。
 
 ## 対応デバイス
 
@@ -16,23 +12,16 @@ C#（.NET Framework 4.8）ライブラリです。キャプチャプロトコル
 | DS用キャプチャボード | FTDI FT232H + Lattice FPGA | `DSCapture_FTD2`移植 | 実機動作確認済み |
 | 3DS LL用キャプチャボード「LL-SPA3」（non-standard.com） | Cypress FX2LP | `Optimize_3DS`移植（CyUSB.NET経由） | 実機動作確認済み |
 
-画面サイズ: 3DSは上400x240/下320x240、DSは256x192が上下2枚。
-2Dキャプチャのみ対応しています。
+画面サイズ: 3DSは上400x240/下320x240、DSは256x192が上下2枚。2Dキャプチャのみ対応しています。
 
 ## ビルド方法
 
 前提: Windows、.NET Framework 4.8 developer pack。
 
-ライセンス上の理由で、次の2つのサードパーティ製コンポーネントは本リポジトリに
-含めていません。ビルド前に各自で配置してください。
+ライセンス上の理由で、次の2つのサードパーティ製コンポーネントは本リポジトリに含めていません。ビルド前に各自で配置してください。
 
-1. **CyUSB.dll**（LL-SPA3用）:
-   [kategray/CyUSB](https://github.com/kategray/CyUSB)を`external/CyUSB`に
-   cloneし、`library/c_sharp`をビルドして
-   `external/CyUSB/library/c_sharp/lib/CyUSB.dll`にアセンブリが置かれる状態に
-   してください（Cypress Software Licenseのためソースを再配布できません）。
-2. **FTDIネイティブDLL**: [FTDI](https://ftdichip.com/)から入手して
-   `native/`に配置してください。
+1. **CyUSB.dll**（LL-SPA3用）: [kategray/CyUSB](https://github.com/kategray/CyUSB)を`external/CyUSB`にcloneし、`library/c_sharp`をビルドして`external/CyUSB/library/c_sharp/lib/CyUSB.dll`にアセンブリが置かれる状態にしてください（Cypress Software Licenseのためソースを再配布できません）。
+2. **FTDIネイティブDLL**: [FTDI](https://ftdichip.com/)から入手して`native/`に配置してください。
    - `native/FTD3XX.dll`（D3XX、N3DSXL用）
    - `native/ftd2xx.dll`（D2XX、DSキャプチャボード用）
 
@@ -42,9 +31,7 @@ C#（.NET Framework 4.8）ライブラリです。キャプチャプロトコル
 dotnet build src/Capture3DS.sln -c Release
 ```
 
-`firmware/`以下のファームウェア（DS用FPGAビットストリームとOptimize用
-FX2ファームウェア）はMITライセンスのcc3dsfsリポジトリ由来で、ビルド時に
-アセンブリへ埋め込まれます。
+`firmware/`以下のファームウェア（DS用FPGAビットストリームとOptimize用FX2ファームウェア）はMITライセンスのcc3dsfsリポジトリ由来で、ビルド時にアセンブリへ埋め込まれます。
 
 ## 使い方
 
@@ -63,13 +50,11 @@ using (var dev = Capture3DSApi.Open(devices[0]))
 }
 ```
 
-`ListDevices()`はネイティブDLLが見つからないバックエンドを黙ってスキップする
-ので、上記DLLの一部しか無い環境でもそのまま動作します。
+`ListDevices()`はネイティブDLLが見つからないバックエンドを黙ってスキップするので、上記DLLの一部しか無い環境でもそのまま動作します。
 
 ## コマンドラインツール
 
-`CaptureProbe.exe [出力フォルダ] [フレーム数]`はデバイスを列挙し、最初の1台に
-接続してPNG（上画面/下画面/720pレターボックス）を保存します。
+`CaptureProbe.exe [出力フォルダ] [フレーム数]`はデバイスを列挙し、最初の1台に接続してPNG（上画面/下画面/720pレターボックス）を保存します。
 
 診断モード:
 
@@ -81,18 +66,10 @@ using (var dev = Capture3DSApi.Open(devices[0]))
 
 ## 注意事項
 
-- **純正ビューアは先に終了してください。** キャプチャボードは排他オープンの
-  デバイスなので、`3ds_capture.exe`や`n3DS_view.exe`の起動中は列挙から
-  消えるか、接続に失敗します。
+- **純正ビューアは先に終了してください。** キャプチャボードは排他オープンのデバイスなので、`3ds_capture.exe`や`n3DS_view.exe`の起動中は列挙から消えるか、接続に失敗します。
 - **N3DSXL**にはFTDI D3XXドライバ（純正の3ds_captureが使うもの）が必要です。
-- **LL-SPA3**はメーカー純正の`cyusb3`ドライバのままで動きます。Zadig/WinUSB
-  へのドライバ入れ替えも、手動でのファームウェア書き込みも不要です。素のFX2
-  （`04B4:8613`）として認識されている場合は、ライブラリがcc3dsfsのOptimize
-  ファームウェアを自動で転送し、デバイスは`04B4:1004`として再列挙されます。
-- **LL-SPA3のプロダクトキー**: 無くても動作します（キー無しの場合、約260秒
-  ごとに映像の再初期化が入ります）。n3DS_viewを使ったことがあるPCではその
-  キャッシュから自動で読み込むため、設定は不要です。無い環境では実行ファイルの
-  隣に`llspa3_key.txt`を置くとキーを指定できます。
+- **LL-SPA3**はメーカー純正の`cyusb3`ドライバのままで動きます。Zadig/WinUSBへのドライバ入れ替えも、手動でのファームウェア書き込みも不要です。素のFX2（`04B4:8613`）として認識されている場合は、ライブラリがcc3dsfsのOptimizeファームウェアを自動で転送し、デバイスは`04B4:1004`として再列挙されます。
+- **LL-SPA3のプロダクトキー**: 無くても動作します（キー無しの場合、約260秒ごとに映像の再初期化が入ります）。n3DS_viewを使ったことがあるPCではそのキャッシュから自動で読み込むため、設定は不要です。無い環境では実行ファイルの隣に`llspa3_key.txt`を置くとキーを指定できます。
 
 ## ライセンスと出典
 
@@ -100,8 +77,6 @@ MIT License。[LICENSE](LICENSE)を参照してください。
 
 本プロジェクトは次のプロジェクトからプロトコル実装を移植しています。
 
-- [cc3dsfs](https://github.com/Lorenzooone/cc3dsfs)（MIT）: キャプチャ
-  プロトコルおよび`firmware/`以下のファームウェア
+- [cc3dsfs](https://github.com/Lorenzooone/cc3dsfs)（MIT）: キャプチャプロトコルおよび`firmware/`以下のファームウェア
 
-任天堂、3dscapture.com、non-standard.com、FTDI、Infineon/Cypressとは
-一切関係ありません。
+任天堂、3dscapture.com、non-standard.com、FTDI、Infineon/Cypressとは一切関係ありません。
