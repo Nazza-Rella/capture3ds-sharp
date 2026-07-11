@@ -1,0 +1,56 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- net48: CyUSB.dll (LL-SPA3) is a managed .NET Framework assembly, so the
+         whole library targets net48. All consumers (NX, CaptureProbe) are net48. -->
+    <TargetFramework>net48</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <AssemblyName>Capture3DS</AssemblyName>
+    <RootNamespace>Capture3DS</RootNamespace>
+    <Nullable>disable</Nullable>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Description>3DS capture-board reader for N3DSXL(FTD3), DS(FTD2) and LL-SPA3(CyUSB). Ports of MIT-licensed ponkan-python and cc3dsfs.</Description>
+    <!-- PDB経由でローカルのビルドパス(ユーザー名等)がDLLに残らないようにする -->
+    <PathMap>$(MSBuildProjectDirectory)=/_/Capture3DS</PathMap>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="CyUSB">
+      <HintPath>..\..\external\CyUSB\library\c_sharp\lib\CyUSB.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- キャプボ用ファームウェアをアセンブリへ埋め込む(cc3dsfs bin/, MIT) -->
+  <!-- ftd2_ds2_fw_1/2=DSキャプボ(FT232H FPGAビットストリーム) -->
+  <!-- optimize_old_3ds_*=LL-SPA3(Cypress FX2 ファーム + FPGA 888 ビットストリーム) -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\..\firmware\ftd2_ds2_fw_1.bin">
+      <LogicalName>Capture3DS.ftd2_ds2_fw_1.bin</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\firmware\ftd2_ds2_fw_2.bin">
+      <LogicalName>Capture3DS.ftd2_ds2_fw_2.bin</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\firmware\optimize_old_3ds_fw.bin">
+      <LogicalName>Capture3DS.optimize_old_3ds_fw.bin</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\firmware\optimize_old_3ds_888_fpga_pl.bin">
+      <LogicalName>Capture3DS.optimize_old_3ds_888_fpga_pl.bin</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
+
+  <!-- 実行時ネイティブDLL。Content なので参照先(Probe/NX)の出力にも自動コピーされる。 -->
+  <!-- FTD3XX.dll=N3DSXL, ftd2xx.dll=DS(FT232H), CyUSB.dll=LL-SPA3。 -->
+  <ItemGroup>
+    <Content Include="..\..\native\FTD3XX.dll" Link="FTD3XX.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\native\ftd2xx.dll" Link="ftd2xx.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\..\external\CyUSB\library\c_sharp\lib\CyUSB.dll" Link="CyUSB.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+</Project>
