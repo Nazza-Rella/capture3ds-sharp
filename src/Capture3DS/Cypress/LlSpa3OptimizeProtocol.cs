@@ -14,7 +14,6 @@ namespace Capture3DS.Cypress
         private const int EepromNewSize = 0x80;
         private const int EepromStructSize = 0x79;
         private const int EepromCrcPos = 0x7C;
-        private const int WindowsJapaneseCodePage = 932;
 
         private static readonly int[] KeyBytesToSerialBytesMap = { 0, 7, 8, 9, 1, 4, 6, 3, 10, 2, 11, 5 };
 
@@ -119,12 +118,87 @@ namespace Capture3DS.Cypress
             key = null;
             source = null;
 
-            if (TryLoadProductKeyFromVrom(out key, out source))
+            if (TryLoadProductKeyFromJson(out key, out source))
             {
                 return true;
             }
 
-            return TryLoadProductKeyFromKeyFile(out key, out source);
+            // 初回はn3DS_viewが残したEEPROMキャッシュから拾い、以後JSONだけで済むよう保存する。
+            if (TryLoadProductKeyFromVrom(out key, out source))
+            {
+                TrySaveProductKeyToJson(key);
+                return true;
+            }
+
+            return false;
+        }
+
+        public static string ProductKeyJsonPath()
+        {
+            var dir = AppDomain.CurrentDomain.BaseDirectory;
+            if (string.IsNullOrWhiteSpace(dir))
+            {
+                dir = Environment.CurrentDirectory;
+            }
+            return Path.Combine(dir, "Capture3DS.json");
+        }
+
+        public static bool TryLoadProductKeyFromJson(out string key, out string source)
+        {
+            key = null;
+            source = null;
+            var path = ProductKeyJsonPath();
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+
+            string text;
+            try
+            {
+                text = File.ReadAllText(path, Encoding.UTF8);
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+
+            var match = System.Text.RegularExpressions.Regex.Match(
+                text, "\"llspa3ProductKey\"\\s*:\\s*\"([^\"]*)\"");
+            if (!match.Success || !TryFindKeyInText(match.Groups[1].Value, out key))
+            {
+                return false;
+            }
+
+            source = path;
+            return true;
+        }
+
+        public static bool TrySaveProductKeyToJson(string key)
+        {
+            if (!TryFindKeyInText(key ?? string.Empty, out var normalized))
+            {
+                return false;
+            }
+
+            try
+            {
+                File.WriteAllText(ProductKeyJsonPath(),
+                    "{\r\n  \"llspa3ProductKey\": \"" + normalized + "\"\r\n}\r\n", Encoding.UTF8);
+                return true;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
         }
 
         public static bool TryLoadProductKeyFromVrom(out string key, out string source)
@@ -163,51 +237,6 @@ namespace Capture3DS.Cypress
                 {
                     source = path;
                     return true;
-                }
-            }
-
-            return false;
-        }
-
-        public static bool TryLoadProductKeyFromKeyFile(out string key, out string source)
-        {
-            key = null;
-            source = null;
-
-            foreach (var dir in new[] { AppDomain.CurrentDomain.BaseDirectory, Environment.CurrentDirectory })
-            {
-                if (string.IsNullOrWhiteSpace(dir))
-                {
-                    continue;
-                }
-
-                var keyPath = Path.Combine(dir, "llspa3_key.txt");
-                if (!File.Exists(keyPath))
-                {
-                    continue;
-                }
-
-                foreach (var encoding in MemoEncodings())
-                {
-                    string text;
-                    try
-                    {
-                        text = File.ReadAllText(keyPath, encoding);
-                    }
-                    catch (IOException)
-                    {
-                        continue;
-                    }
-                    catch (UnauthorizedAccessException)
-                    {
-                        continue;
-                    }
-
-                    if (TryFindKeyInText(text, out key))
-                    {
-                        source = keyPath;
-                        return true;
-                    }
                 }
             }
 
@@ -335,18 +364,6 @@ namespace Capture3DS.Cypress
             key = ReadString(eepromData, 0x10, KeyCharsWithDashes);
             return TryValidateProductKey(key);
         }
-        private static Encoding[] MemoEncodings()
-        {
-            try
-            {
-                return new[] { Encoding.UTF8, Encoding.GetEncoding(WindowsJapaneseCodePage), Encoding.Default };
-            }
-            catch (ArgumentException)
-            {
-                return new[] { Encoding.UTF8, Encoding.Default };
-            }
-        }
-
         private static bool TryFindKeyInText(string text, out string key)
         {
             key = null;

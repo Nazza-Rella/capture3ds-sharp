@@ -40,6 +40,21 @@ namespace Capture3DS
             }
         }
 
+        /// <summary>
+        /// LL-SPA3のプロダクトキーを取得する。Capture3DS.json → n3DS_viewのEEPROM
+        /// キャッシュの順で探し、キャッシュから拾えた場合はJSONへ保存する。無ければnull。
+        /// </summary>
+        public static string GetLlSpa3ProductKey()
+        {
+            return LlSpa3OptimizeProtocol.TryLoadProductKey(out var key, out _) ? key : null;
+        }
+
+        /// <summary>LL-SPA3のプロダクトキーをCapture3DS.jsonへ保存する。書式不正・保存失敗はfalse。</summary>
+        public static bool SetLlSpa3ProductKey(string key)
+        {
+            return LlSpa3OptimizeProtocol.TrySaveProductKeyToJson(key);
+        }
+
         private static IReadOnlyList<Capture3DSDeviceInfo> SafeList(Func<IReadOnlyList<Capture3DSDeviceInfo>> lister)
         {
             try { return lister(); }
