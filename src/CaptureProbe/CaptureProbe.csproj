@@ -5,6 +5,8 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>disable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
+    <!-- PDB経由でローカルのビルドパス(ユーザー名等)がバイナリに残らないようにする -->
+    <PathMap>$(MSBuildProjectDirectory)=/_/CaptureProbe</PathMap>
   </PropertyGroup>
 
   <ItemGroup>
