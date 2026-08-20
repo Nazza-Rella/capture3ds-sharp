@@ -11,6 +11,7 @@
 | New 3DS XL用キャプチャボード（3dscapture.com「N3DSXL」） | FTDI FT600（D3XX） | `3DSCapture_FTD3`移植 |
 | DS用キャプチャボード | FTDI FT232H + Lattice FPGA | `DSCapture_FTD2`移植 |
 | 3DS LL用キャプチャボード「LL-SPA3」（non-standard.com） | Cypress FX2LP | `Optimize_3DS`移植（CyUSB.NET経由） |
+| Loopy製 初代3DS用キャプチャボード | USB 2.0（VID:PID `16D0:06A3`） | `usb_ds_3ds_capture`移植（libusb経由、実機未検証） |
 
 画面サイズ: 3DSは上400x240/下320x240、DSは256x192が上下2枚。2Dキャプチャのみ対応しています。
 
@@ -18,12 +19,13 @@
 
 前提: Windows、.NET Framework 4.8 developer pack。
 
-ライセンス上の理由で、次の2つのサードパーティ製コンポーネントは本リポジトリに含めていません。ビルド前に各自で配置してください。
+次のサードパーティ製コンポーネントは本リポジトリに含めていません。使用する機種に合わせて、ビルド前に各自で配置してください。
 
 1. **CyUSB.dll**（LL-SPA3用）: [kategray/CyUSB](https://github.com/kategray/CyUSB)を`external/CyUSB`にcloneし、`library/c_sharp`をビルドして`external/CyUSB/library/c_sharp/lib/CyUSB.dll`にアセンブリが置かれる状態にしてください（Cypress Software Licenseのためソースを再配布できません）。
 2. **FTDIネイティブDLL**: [FTDI](https://ftdichip.com/)から入手して`native/`に配置してください。
    - `native/FTD3XX.dll`（D3XX、N3DSXL用）
    - `native/ftd2xx.dll`（D2XX、DSキャプチャボード用）
+3. **libusb-1.0.dll**（Loopy製初代3DS用）: [libusb v1.0.26](https://github.com/libusb/libusb/releases/tag/v1.0.26)の64-bit Windows版を`native/libusb-1.0.dll`に配置してください。
 
 配置後、次でビルドできます。
 
@@ -70,6 +72,7 @@ using (var dev = Capture3DSApi.Open(devices[0]))
 - **N3DSXL**にはFTDI D3XXドライバ（純正の3ds_captureが使うもの）が必要です。
 - **LL-SPA3**はメーカー純正の`cyusb3`ドライバのままで動きます。Zadig/WinUSBへのドライバ入れ替えも、手動でのファームウェア書き込みも不要です。素のFX2（`04B4:8613`）として認識されている場合は、ライブラリがcc3dsfsのOptimizeファームウェアを自動で転送し、デバイスは`04B4:1004`として再列挙されます。
 - **LL-SPA3のプロダクトキー**: 無くても動作します（キー無しの場合、約260秒ごとに映像の再初期化が入ります）。キーは実行ファイルの隣の`Capture3DS.json`から読み込みます。無い場合でも、n3DS_viewを使ったことがあるPCならそのキャッシュから自動で読み込み、`Capture3DS.json`へ保存します。手動で設定するときはこのJSONを直接編集するか、`Capture3DSApi.SetLlSpa3ProductKey`を呼んでください。
+- **Loopy製初代3DS**は、libusbからアクセスできるWindowsドライバと`libusb-1.0.dll`が必要です。ホスト側からのファームウェア転送は行いません。実装はcc3dsfsとCuteCaptureを参照していますが、実機未所持のため動作未検証です。
 
 ## ライセンスと出典
 
@@ -78,5 +81,6 @@ MIT License。[LICENSE](LICENSE)を参照してください。
 本プロジェクトは次のプロジェクトからプロトコル実装を移植しています。
 
 - [cc3dsfs](https://github.com/Lorenzooone/cc3dsfs)（MIT）: キャプチャプロトコルおよび`firmware/`以下のファームウェア
+- [CuteCapture](https://github.com/Gotos/CuteCapture)（Apache-2.0）: Loopy製初代3DSのUSBプロトコルと画面配置の参考実装
 
-任天堂、3dscapture.com、non-standard.com、FTDI、Infineon/Cypressとは一切関係ありません。
+任天堂、3dscapture.com、non-standard.com、Loopy、FTDI、Infineon/Cypressとは一切関係ありません。
