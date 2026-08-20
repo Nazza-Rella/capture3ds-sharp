@@ -11,6 +11,8 @@ namespace Capture3DS
         DsFtd2,
         /// <summary>LL-SPA3 偽トロ (Cypress FX2 / CyUSB)。</summary>
         LlSpa3,
+        /// <summary>Loopy製 初代3DS用キャプチャボード (USB2 / libusb)。</summary>
+        LoopyOld3ds,
     }
 
     /// <summary>列挙で見つかった 1 台のデバイス情報。Open() に渡す。</summary>
@@ -23,13 +25,39 @@ namespace Capture3DS
         public string Description { get; }
         /// <summary>SuperSpeed(USB3)なら true。</summary>
         public bool SuperSpeed { get; }
+        /// <summary>
+        /// 同一機種を複数接続したときに個体を識別するための、バックエンド固有ID。
+        /// 空の場合は個体識別できない。表示用途ではなく、列挙結果の選択保持に使う。
+        /// </summary>
+        public string DeviceId { get; }
+
+        /// <summary>機種を含む、Capture3DS内で一意なデバイス識別子。</summary>
+        public string StableId => string.IsNullOrEmpty(DeviceId)
+            ? string.Empty
+            : $"{Model}:{DeviceId}";
 
         public Capture3DSDeviceInfo(Capture3DSModel model, string serial, string description, bool superSpeed)
+            : this(model, serial, description, superSpeed,
+                  string.IsNullOrWhiteSpace(serial) ? string.Empty : "serial:" + serial.Trim())
+        {
+        }
+
+        /// <summary>
+        /// バックエンドがシリアル以外の安定した個体識別子を持つ場合に使用する。
+        /// 既存の4引数コンストラクタとの互換性は維持される。
+        /// </summary>
+        public Capture3DSDeviceInfo(
+            Capture3DSModel model,
+            string serial,
+            string description,
+            bool superSpeed,
+            string deviceId)
         {
             Model = model;
             Serial = serial ?? string.Empty;
             Description = description ?? string.Empty;
             SuperSpeed = superSpeed;
+            DeviceId = deviceId ?? string.Empty;
         }
 
         public override string ToString()
@@ -47,6 +75,7 @@ namespace Capture3DS
                     case Capture3DSModel.N3dsxl: return "N3DSXL Capture Board";
                     case Capture3DSModel.DsFtd2: return "DS Capture Board";
                     case Capture3DSModel.LlSpa3: return "LL-SPA3";
+                    case Capture3DSModel.LoopyOld3ds: return "Loopy Old 3DS Capture Board";
                     default: return Model.ToString();
                 }
             }

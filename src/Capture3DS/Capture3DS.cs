@@ -4,6 +4,7 @@ using System.IO;
 using Capture3DS.Cypress;
 using Capture3DS.Ftd2;
 using Capture3DS.Ftd3;
+using Capture3DS.Loopy;
 
 namespace Capture3DS
 {
@@ -21,6 +22,7 @@ namespace Capture3DS
             list.AddRange(SafeList(Ftd3N3dsxlDevice.ListDevices));
             list.AddRange(SafeList(DsFtd2Device.ListDevices));
             list.AddRange(SafeList(LlSpa3Device.ListDevices));
+            list.AddRange(SafeList(LoopyOld3dsDevice.ListDevices));
             return list;
         }
 
@@ -35,6 +37,8 @@ namespace Capture3DS
                     return DsFtd2Device.Open(info);
                 case Capture3DSModel.LlSpa3:
                     return LlSpa3Device.Open(info);
+                case Capture3DSModel.LoopyOld3ds:
+                    return LoopyOld3dsDevice.Open(info);
                 default:
                     throw new Capture3DSException($"model not implemented yet: {info.Model}");
             }
