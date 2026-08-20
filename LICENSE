@@ -22,10 +22,19 @@ SOFTWARE.
 
 ---
 
-This project is a C# port of protocol implementations from the following
-MIT-licensed project:
+This project incorporates or adapts protocol information from the following
+projects:
 
 - cc3dsfs (https://github.com/Lorenzooone/cc3dsfs)
   Copyright (c) Lorenzooone
   The capture protocols (FTD3 / FTD2 / Optimize Cypress) and the firmware
   binaries bundled under firmware/ originate from this project.
+
+- CuteCapture (https://github.com/Gotos/CuteCapture)
+  Licensed under the Apache License, Version 2.0.
+  Its Loopy original-3DS USB protocol and image layout were used as a
+  reference. A copy of its Apache License is included at
+  LICENSES/CuteCapture-Apache-2.0.txt.
+
+Third-party runtime libraries are not covered by this MIT License. See
+THIRD_PARTY_NOTICES.md for their separate licence terms and download sources.
