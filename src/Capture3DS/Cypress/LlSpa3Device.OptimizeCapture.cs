@@ -474,7 +474,7 @@ namespace Capture3DS.Cypress
         // starting there. Every subsequent frame is re-verified at offset 0 and we
         // fall back to a rescan if the header is missing, so a dropped slice cannot
         // permanently shear the video.
-        private byte[] ReadOptimizeFrameFromPipeline(int targetLength, int timeoutMs)
+        private byte[] ReadOptimizeFrameFromPipeline(int timeoutMs)
         {
             while (true)
             {
@@ -497,6 +497,18 @@ namespace Capture3DS.Cypress
                     _synced = true;
                 }
 
+                while (_streamLen < 4)
+                {
+                    FillMoreSlices(timeoutMs);
+                }
+
+                // The column-0 header states whether this frame carries the extra
+                // 401st column instead of the header-less trailing block, which
+                // changes the frame length by one column header.
+                var targetLength = LlSpa3Decoder.HasExtraHeaderColumn(_stream, 0)
+                    ? LlSpa3Decoder.ExtraHeaderFrameSize
+                    : LlSpa3Decoder.FrameSize;
+
                 while (_streamLen < targetLength)
                 {
                     FillMoreSlices(timeoutMs);
@@ -509,7 +521,7 @@ namespace Capture3DS.Cypress
                     continue;
                 }
 
-                if (!IsFrameInternallyAligned(_stream, 0))
+                if (!IsFrameInternallyAligned(_stream, 0, targetLength == LlSpa3Decoder.ExtraHeaderFrameSize))
                 {
                     // A mid-frame stream gap sheared the later columns even though the
                     // offset-0 header still matches. Step past this false start so the
@@ -560,7 +572,8 @@ namespace Capture3DS.Cypress
 
         // Every column 0..399 starts with magic 0xCC33 and a column_info word whose
         // low 10 bits equal the column index (the trailing bottom-only block has no
-        // header). The free-running EP 0x82 stream can lose a chunk mid-frame when the
+        // header; the extra-header frame ends with a full column 400 instead).
+        // The free-running EP 0x82 stream can lose a chunk mid-frame when the
         // host pipeline re-arms a hair too late; that gap shifts every column after it,
         // so the offset-0 header still matches while the later (right-side) columns are
         // sheared. Verify all column headers before accepting the frame: a mismatch
@@ -568,9 +581,10 @@ namespace Capture3DS.Cypress
         private const int SyncColumnStride = 1456;
         private const int SyncColumnCount = 400;
 
-        private static bool IsFrameInternallyAligned(byte[] buf, int frameStart)
+        private static bool IsFrameInternallyAligned(byte[] buf, int frameStart, bool hasExtraHeader)
         {
-            for (var col = 0; col < SyncColumnCount; col++)
+            var columnCount = hasExtraHeader ? SyncColumnCount + 1 : SyncColumnCount;
+            for (var col = 0; col < columnCount; col++)
             {
                 var pos = frameStart + (col * SyncColumnStride);
                 var magic = (ushort)(buf[pos] | (buf[pos + 1] << 8));

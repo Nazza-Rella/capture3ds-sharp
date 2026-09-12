@@ -18,6 +18,16 @@ namespace Capture3DS.Cypress
     //   BOT  col 318         <- columns_data[80] plane0
     //   BOT  col 319         <- bottom_only_column plane0
     //
+    // When bit 15 (has_extra_header_data_2d_only) of the column-0 column_info is
+    // set, the frame is USB8883DSOptimizeCaptureReceivedExtraHeader instead:
+    // columns_data[401] (583856 bytes), the trailing header-less block is gone and
+    // the bottom split shifts by one column (conversions.cpp
+    // usb_3DS888OptimizeconvertVideoToOutputLineDirectOpt):
+    //   TOP  col j (0..399)  <- columns_data[j] plane1
+    //   BOT  col 0..318      <- columns_data[81..399] plane0
+    //   BOT  col 319         <- columns_data[78] plane0
+    //   columns_data[400] is not part of the picture and is discarded.
+    //
     // cc3dsfs stores screen_data column-major with base_rotation=90; the upright
     // image is buffer[col*240 + (239-h)], so output row = 239 - h.
     internal static class LlSpa3Decoder
@@ -26,11 +36,12 @@ namespace Capture3DS.Cypress
         public const int TopWidth = 400;
         public const int BottomWidth = 320;
 
-        private const int ColumnStride = 1456;
+        public const int ColumnStride = 1456;
         private const int ColumnHeaderSize = 16;
-        private const int NumColumns = 400;
+        public const int NumColumns = 400;
         private const int BottomOnlyOffset = NumColumns * ColumnStride; // 582400
         public const int FrameSize = BottomOnlyOffset + Height * 2 * 3; // 583840
+        public const int ExtraHeaderFrameSize = (NumColumns + 1) * ColumnStride; // 583856
 
         // Old 3DS column->screen split constants (conversions.cpp lines 642-644).
         private const int ColumnPreLastBotPos = 80;  // (40*2)
@@ -40,6 +51,14 @@ namespace Capture3DS.Cypress
         private const int PlaneBottom = 0;
         private const int PlaneTop = 1;
 
+        // cc3dsfs usb_OptimizeHasExtraHeaderSoundData: bit 15 of the column_info
+        // word that follows the 0xCC33 magic.
+        public static bool HasExtraHeaderColumn(byte[] raw, int frameStart)
+        {
+            var columnInfo = (ushort)(raw[frameStart + 2] | (raw[frameStart + 3] << 8));
+            return (columnInfo & 0x8000) != 0;
+        }
+
         public static Capture3DSFrame Decode(byte[] raw, int length)
         {
             if (raw == null || length <= 0)
@@ -47,10 +66,12 @@ namespace Capture3DS.Cypress
                 throw new Capture3DSException("LL-SPA3 returned no capture data.");
             }
 
-            if (length < FrameSize)
+            var hasExtraHeader = length >= 4 && HasExtraHeaderColumn(raw, 0);
+            var neededLength = hasExtraHeader ? BottomOnlyOffset : FrameSize;
+            if (length < neededLength)
             {
                 throw new Capture3DSException(
-                    $"LL-SPA3 raw frame is too short: {length} bytes; expected at least {FrameSize} bytes.");
+                    $"LL-SPA3 raw frame is too short: {length} bytes; expected at least {neededLength} bytes.");
             }
 
             var top = new byte[TopWidth * Height * 3];
@@ -61,14 +82,21 @@ namespace Capture3DS.Cypress
                 FillColumn(raw, (j * ColumnStride) + ColumnHeaderSize, PlaneTop, top, TopWidth, j);
             }
 
-            for (int column = ColumnStartBotPos; column < NumColumns; column++)
+            var startBotPos = hasExtraHeader ? ColumnStartBotPos - 1 : ColumnStartBotPos;
+            var preLastBotPos = hasExtraHeader ? ColumnPreLastBotPos - 2 : ColumnPreLastBotPos;
+            var targetPreLast = hasExtraHeader ? BottomWidth - 1 : TargetBotColumnPreLast;
+
+            for (int column = startBotPos; column < NumColumns; column++)
             {
                 FillColumn(raw, (column * ColumnStride) + ColumnHeaderSize, PlaneBottom,
-                    bottom, BottomWidth, column - ColumnStartBotPos);
+                    bottom, BottomWidth, column - startBotPos);
             }
-            FillColumn(raw, (ColumnPreLastBotPos * ColumnStride) + ColumnHeaderSize, PlaneBottom,
-                bottom, BottomWidth, TargetBotColumnPreLast);
-            FillColumn(raw, BottomOnlyOffset, PlaneBottom, bottom, BottomWidth, BottomWidth - 1);
+            FillColumn(raw, (preLastBotPos * ColumnStride) + ColumnHeaderSize, PlaneBottom,
+                bottom, BottomWidth, targetPreLast);
+            if (!hasExtraHeader)
+            {
+                FillColumn(raw, BottomOnlyOffset, PlaneBottom, bottom, BottomWidth, BottomWidth - 1);
+            }
 
             return new Capture3DSFrame(top, TopWidth, Height, bottom, BottomWidth, Height);
         }

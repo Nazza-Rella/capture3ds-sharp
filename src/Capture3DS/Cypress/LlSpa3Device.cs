@@ -221,7 +221,7 @@ namespace Capture3DS.Cypress
                 StartOptimizeNewCompatibleStream();
             }
 
-            var raw = ReadOptimizeFrameFromPipeline(LlSpa3Decoder.FrameSize, TimeoutMs);
+            var raw = ReadOptimizeFrameFromPipeline(TimeoutMs);
             return LlSpa3Decoder.Decode(raw, raw.Length);
         }
 
