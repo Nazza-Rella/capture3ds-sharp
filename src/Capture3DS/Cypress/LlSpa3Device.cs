@@ -26,6 +26,7 @@ namespace Capture3DS.Cypress
         private CyBulkEndPoint _ctrlBulkIn;
         private CyBulkEndPoint _bulkOut;
         private bool _streamStarted;
+        private readonly LlSpa3AudioDecoder _audioDecoder = new LlSpa3AudioDecoder();
 
         private LlSpa3Device(Capture3DSDeviceInfo info)
         {
@@ -222,7 +223,7 @@ namespace Capture3DS.Cypress
             }
 
             var raw = ReadOptimizeFrameFromPipeline(TimeoutMs);
-            return LlSpa3Decoder.Decode(raw, raw.Length);
+            return LlSpa3Decoder.Decode(raw, raw.Length, _audioDecoder);
         }
 
         public void Dispose()
@@ -241,6 +242,7 @@ namespace Capture3DS.Cypress
 
         private void DisposeHandle()
         {
+            _audioDecoder.Reset();
             TeardownOptimizePipeline();
             if (_bulkIn != null)
             {

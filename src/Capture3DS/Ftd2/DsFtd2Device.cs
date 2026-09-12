@@ -151,7 +151,7 @@ namespace Capture3DS.Ftd2
                 {
                     int realLen = RemoveSynchFromFinalLength(buf, FullSize);
                     int initialOffset = InitialSynchOffset(buf, realLen);
-                    return DsDecoder.DecodeRgb8(buf, initialOffset);
+                    return DsDecoder.DecodeRgb8(buf, initialOffset, realLen);
                 }
 
                 // 再整列: next の先頭に退避済み。buf/next を入替え、不足分(newNextSize)だけ読み足す。

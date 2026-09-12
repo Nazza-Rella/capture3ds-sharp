@@ -1,6 +1,6 @@
 # capture3ds-sharp
 
-3DS/DSキャプチャボードの映像を、純正ビューアを起動せずにUSBから直接読み取るC#（.NET Framework 4.8）ライブラリです。キャプチャプロトコルはMITライセンスの[cc3dsfs](https://github.com/Lorenzooone/cc3dsfs)をC#に移植したものです。
+3DS/DSキャプチャボードの映像と音声を、純正ビューアを起動せずにUSBから直接読み取るC#（.NET Framework 4.8）ライブラリです。キャプチャプロトコルはMITライセンスの[cc3dsfs](https://github.com/Lorenzooone/cc3dsfs)をC#に移植したものです。
 
 フレームは実解像度のRGB8バッファ（上画面・下画面を別々に）で取得でき、上下を縦に並べたモザイク画像や1280x720レターボックス画像への変換ヘルパーも用意しています。
 
@@ -53,6 +53,33 @@ using (var dev = Capture3DSApi.Open(devices[0]))
 ```
 
 `ListDevices()`はネイティブDLLが見つからないバックエンドを黙ってスキップするので、上記DLLの一部しか無い環境でもそのまま動作します。
+
+## USB音声
+
+`ReadFrame()`の戻り値にある`frame.Audio`から、同じUSBパケットに含まれる音声を取得できます。ライブラリ自身はスピーカー再生を行わず、追加の音声デバイスやUSB接続も開きません。
+
+対応する取得経路は、N3DSXL（FTD3）、DS（FTD2）、LL-SPA3（Cypress）、Loopy製初代3DS（libusb）です。DSは本ライブラリが対応するFTD2モデルに限り、USB音声非対応の旧世代DSボードを音声対応にするものではありません。音声は合成パケットによるテスト済みですが、各機種での実機再生は未検証です。
+
+```csharp
+Capture3DSAudioChunk audio = frame.Audio;
+if (audio != null)
+{
+    short[] pcm = audio.Samples; // signed PCM16: L, R, L, R, ...
+    int channels = audio.Channels; // 2
+    int nominalRate = audio.SampleRate; // 32728 Hz
+    double sourceRate = (double)audio.SampleRateNumerator
+                      / audio.SampleRateDenominator; // 67027964 / 2048 Hz
+    // 必要なら、呼び出し側の上限付き音声キューへ渡して別スレッドで再生する。
+}
+```
+
+`Samples`はそのチャンクが所有する配列で、次の`ReadFrame()`やデバイスの破棄で上書きされません。公開コンストラクター`new Capture3DSAudioChunk(samples)`も入力配列をコピーします。配列の変更は、同じチャンクを使う別の処理と競合しないよう呼び出し側で管理してください。
+
+完全なステレオサンプルが一つもない場合や、音声の境界・ヘッダー検証に失敗した場合は`Audio`が`null`になります。末尾の不完全なステレオの組は捨て、それ以前の完全な組は返します。転送バッファの未使用領域や末尾の同期パディングは音声として扱いません。LL-SPA3は通常フレームと追加ヘッダー付きフレームを区別し、フレームをまたぐサンプル番号の重複を除き、再接続時に番号をリセットします。
+
+既存の6引数の`Capture3DSFrame`コンストラクターと映像APIはそのまま使えます。音声の再生・リサンプリング・音量・遅延制御は利用側の責任です。`SampleRate`は丸めた整数値なので、長時間の同期が必要な場合は分子・分母から正確なレートを使ってください。音声を映像プレビューの描画間隔に合わせて間引くと途切れるため、取得した音声はUI描画とは独立して処理してください。
+
+ハードウェアを使わない回帰テストの実行方法は[tests/README.md](tests/README.md)を参照してください。
 
 ## コマンドラインツール
 

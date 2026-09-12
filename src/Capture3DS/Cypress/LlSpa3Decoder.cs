@@ -61,6 +61,11 @@ namespace Capture3DS.Cypress
 
         public static Capture3DSFrame Decode(byte[] raw, int length)
         {
+            return Decode(raw, length, null);
+        }
+
+        internal static Capture3DSFrame Decode(byte[] raw, int length, LlSpa3AudioDecoder audioDecoder)
+        {
             if (raw == null || length <= 0)
             {
                 throw new Capture3DSException("LL-SPA3 returned no capture data.");
@@ -98,7 +103,8 @@ namespace Capture3DS.Cypress
                 FillColumn(raw, BottomOnlyOffset, PlaneBottom, bottom, BottomWidth, BottomWidth - 1);
             }
 
-            return new Capture3DSFrame(top, TopWidth, Height, bottom, BottomWidth, Height);
+            var audio = audioDecoder != null ? audioDecoder.Decode(raw, length) : null;
+            return new Capture3DSFrame(top, TopWidth, Height, bottom, BottomWidth, Height, audio);
         }
 
         // Deinterleaves one plane of one source column (60 groups x 24B) into the

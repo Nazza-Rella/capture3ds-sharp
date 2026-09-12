@@ -3,6 +3,37 @@ using System;
 namespace Capture3DS
 {
     /// <summary>
+    /// Owned signed PCM16 samples from a DS/3DS capture packet, interleaved L/R.
+    /// Playback must consume these separately from preview/UI frame scheduling.
+    /// </summary>
+    public sealed class Capture3DSAudioChunk
+    {
+        public const int DsSampleRateNumerator = 67027964;
+        public const int DsSampleRateDenominator = 2048;
+        public int SampleRate { get { return 32728; } }
+        public int SampleRateNumerator { get { return DsSampleRateNumerator; } }
+        public int SampleRateDenominator { get { return DsSampleRateDenominator; } }
+        public int Channels { get { return 2; } }
+        /// <summary>Owned L/R sample pairs; never aliases the reusable USB buffer.</summary>
+        public short[] Samples { get; }
+
+        public Capture3DSAudioChunk(short[] samples) : this(samples, false) { }
+
+        private Capture3DSAudioChunk(short[] samples, bool owned)
+        {
+            if (samples == null) throw new ArgumentNullException(nameof(samples));
+            if (samples.Length == 0 || (samples.Length & 1) != 0)
+                throw new ArgumentException("Complete, nonempty stereo sample pairs are required.", nameof(samples));
+            Samples = owned ? samples : (short[])samples.Clone();
+        }
+
+        internal static Capture3DSAudioChunk FromOwnedSamples(short[] samples)
+        {
+            return new Capture3DSAudioChunk(samples, true);
+        }
+    }
+
+    /// <summary>
     /// デコード済みの 1 フレーム。上下画面を RGB8(行優先, 1px=3byte: R,G,B)で保持する。
     /// 画面サイズは機種で異なるため各画面ごとに幅/高さを持つ。
     ///  - N3DSXL : Top 400x240, Bottom 320x240
@@ -25,8 +56,18 @@ namespace Capture3DS
         public int BottomWidth { get; }
         public int BottomHeight { get; }
 
+        /// <summary>PCM from this capture packet, or null when no complete audio is available.</summary>
+        public Capture3DSAudioChunk Audio { get; }
+
         public Capture3DSFrame(byte[] top, int topWidth, int topHeight,
                                byte[] bottom, int bottomWidth, int bottomHeight)
+            : this(top, topWidth, topHeight, bottom, bottomWidth, bottomHeight, null)
+        {
+        }
+
+        public Capture3DSFrame(byte[] top, int topWidth, int topHeight,
+                               byte[] bottom, int bottomWidth, int bottomHeight,
+                               Capture3DSAudioChunk audio)
         {
             Top = top;
             Bottom = bottom;
@@ -34,6 +75,7 @@ namespace Capture3DS
             TopHeight = topHeight;
             BottomWidth = bottomWidth;
             BottomHeight = bottomHeight;
+            Audio = audio;
         }
 
         /// <summary>

@@ -29,7 +29,9 @@ namespace Capture3DS.Loopy
             DecodeScreen(raw, 0, top, TopWidth);
             DecodeScreen(raw, TopWidth * Height * 3, bottom, BottomWidth);
 
-            return new Capture3DSFrame(top, TopWidth, Height, bottom, BottomWidth, Height);
+            var audio = Capture3DSAudioDecoder.DecodePcm16StereoTail(
+                raw, rawLength, VideoSize, Capture3DSAudioDecoder.Max3dsAudioBytes);
+            return new Capture3DSFrame(top, TopWidth, Height, bottom, BottomWidth, Height, audio);
         }
 
         private static void DecodeScreen(byte[] raw, int rawOffset, byte[] output, int width)

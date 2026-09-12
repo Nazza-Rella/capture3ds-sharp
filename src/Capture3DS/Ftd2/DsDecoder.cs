@@ -24,6 +24,14 @@ namespace Capture3DS.Ftd2
         /// <param name="videoOffset">先頭の同期値(0x4321)を読み飛ばしたあとの映像開始位置。</param>
         public static Capture3DSFrame DecodeRgb8(byte[] raw, int videoOffset)
         {
+            // Legacy callers supplied no valid packet length: preserve the
+            // video-only contract rather than playing unverified trailing bytes.
+            return DecodeRgb8(raw, videoOffset, videoOffset + VideoSize);
+        }
+
+        /// <summary>Decode an aligned packet whose trailing synchronization padding was removed.</summary>
+        public static Capture3DSFrame DecodeRgb8(byte[] raw, int videoOffset, int packetLength)
+        {
             if (raw == null) throw new ArgumentNullException(nameof(raw));
             if (videoOffset < 0 || videoOffset + VideoSize > raw.Length)
                 throw new Capture3DSException(
@@ -45,7 +53,9 @@ namespace Capture3DS.Ftd2
                 Rgb565To888(bv, bottom, ref ob);
             }
 
-            return new Capture3DSFrame(top, Width, Height, bottom, Width, Height);
+            var audio = Capture3DSAudioDecoder.DecodePcm16StereoTail(
+                raw, packetLength, videoOffset + VideoSize, Capture3DSAudioDecoder.MaxDsAudioBytes);
+            return new Capture3DSFrame(top, Width, Height, bottom, Width, Height, audio);
         }
 
         /// <summary>標準 RGB565 (R=bit11-15, G=bit5-10, B=bit0-4) を RGB8 へ展開。

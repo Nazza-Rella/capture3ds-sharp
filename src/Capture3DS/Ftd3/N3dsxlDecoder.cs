@@ -62,7 +62,15 @@ namespace Capture3DS.Ftd3
                 }
             }
 
-            return new Capture3DSFrame(top, TopWidth, Height, bottom, BottomWidth, Height);
+            // Keep existing video acceptance/alignment unchanged. The upstream
+            // transport reserves its last 1024 bytes for erroneous full reads;
+            // those reads must never be played as audio.
+            const int maxNonErrorTransfer = 555008 - 1024;
+            var audio = rawLength <= maxNonErrorTransfer
+                ? Capture3DSAudioDecoder.DecodePcm16StereoTail(
+                    raw, rawLength, VideoSize2D, Capture3DSAudioDecoder.Max3dsAudioBytes)
+                : null;
+            return new Capture3DSFrame(top, TopWidth, Height, bottom, BottomWidth, Height, audio);
         }
     }
 }
