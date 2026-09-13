@@ -16,11 +16,21 @@ namespace Capture3DS.Ftd3
         public const uint FT_OPEN_BY_SERIAL_NUMBER = 1;
         public const uint FT_FLAGS_SUPERSPEED = 0x00000004;
 
-        // I/O がまだ完了していない状態。同期読みでもデバイスのタイミングで返ることがあり、
-        // 致命ではなく「もう一度読めば取れる」リトライ対象。これを fatal 扱いすると
-        // 接続中の SPI 読み失敗・再接続失敗・取り込み中の周期的なフレーム取りこぼしを招く。
-        public const int FT_IO_PENDING = 0x20;
-        public const int FT_IO_INCOMPLETE = 0x21;
+        // FTDI AN_379 / FTD3XX.h defines these as decimal 24/25 (0x18/0x19).
+        // Decimal 32 (0x20) is FT_OTHER_ERROR, not an incomplete operation.
+        // Keep the existing bounded recovery policy, but classify the real codes.
+        public const int FT_IO_PENDING = 24;
+        public const int FT_IO_INCOMPLETE = 25;
+
+        // Win32 OVERLAPPED has pointer-sized Internal/InternalHigh and hEvent.
+        // Its address, and the read buffer, must remain stable until completion.
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct Overlapped
+        {
+            internal IntPtr Internal, InternalHigh;
+            internal uint Offset, OffsetHigh;
+            internal IntPtr Event;
+        }
 
         public static bool Failed(int status) => status != FT_OK;
 
@@ -63,5 +73,21 @@ namespace Capture3DS.Ftd3
         [DllImport(DLL, CallingConvention = CallingConvention.StdCall)]
         public static extern int FT_ReadPipe(IntPtr ftHandle, byte pipe, byte[] buffer, uint bufferLength,
             out uint bytesTransferred, IntPtr overlapped);
+
+        // The byte[] overload above is synchronous only. An asynchronous call
+        // cannot retain a marshaller's temporary buffer or stack out parameter.
+        [DllImport(DLL, EntryPoint = "FT_ReadPipe", CallingConvention = CallingConvention.StdCall)]
+        public static extern int FT_ReadPipeAsync(IntPtr ftHandle, byte pipe, IntPtr buffer, uint bufferLength,
+            IntPtr bytesTransferred, IntPtr overlapped);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.StdCall)]
+        public static extern int FT_InitializeOverlapped(IntPtr ftHandle, IntPtr overlapped);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.StdCall)]
+        public static extern int FT_GetOverlappedResult(IntPtr ftHandle, IntPtr overlapped,
+            out uint bytesTransferred, [MarshalAs(UnmanagedType.Bool)] bool wait);
+
+        [DllImport(DLL, CallingConvention = CallingConvention.StdCall)]
+        public static extern int FT_ReleaseOverlapped(IntPtr ftHandle, IntPtr overlapped);
     }
 }

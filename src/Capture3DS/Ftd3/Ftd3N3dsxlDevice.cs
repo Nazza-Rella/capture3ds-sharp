@@ -10,7 +10,7 @@ namespace Capture3DS.Ftd3
     /// 列挙/オープン/接続シーケンスは cc3dsfs (MIT) のドライバ経路、
     /// コマンド列とフレーム読みは ponkan-python (MIT) に準拠した 2D 実装。
     /// </summary>
-    public sealed class Ftd3N3dsxlDevice : ICapture3DSDevice
+    public sealed class Ftd3N3dsxlDevice : ICancellableCapture3DSDevice
     {
         private const byte BulkOut = 0x02;
         private const byte BulkIn = 0x82;
@@ -41,12 +41,10 @@ namespace Capture3DS.Ftd3
         private const int RawFrameReadAttempts = 16;
 
         private IntPtr _handle = IntPtr.Zero;
+        private bool _closeFailed;
         private readonly byte[] _frameBuffer = new byte[CaptureSize2D];
+        private Ftd3ReadPipeline _readPipeline;
 
-        // デバイス固有の整列フレーム長(短パケットで終端される 1 フレーム分の転送長)。
-        // 接続後の最初の正常読みで学習し、以後この長さ以外は「フレーム途中から始まった
-        // ミスアライン」とみなして再同期・破棄する。0=未学習。
-        private uint _expectedFrameSize;
 
         public Capture3DSDeviceInfo Info { get; }
 
@@ -129,99 +127,80 @@ namespace Capture3DS.Ftd3
         }
 
         public void Connect()
+            => Connect(CancellationToken.None);
+
+        public void Connect(CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_handle != IntPtr.Zero)
+                throw new Capture3DSException("device is already connected; dispose before reconnecting");
             Capture3DSException last = null;
             for (int attempt = 1; attempt <= ConnectAttempts; attempt++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 try
                 {
                     // 1回目: ドレイン用に開いて即閉じる
-                    OpenHandle();
-                    DrainData();
+                    OpenHandle(cancellationToken);
+                    DrainData(cancellationToken);
                     CloseHandle();
 
                     // 2回目: 本接続
-                    OpenHandle();
-                    Spi3dsCcStuff();
-                    Load3dsCcFirmware(1);
-                    Read3dsConfig3d();
-                    SetStreamPipe2D();
-                    // 取り込み読みが無限待ちでゾンビ化しないよう、必ず有限タイムアウトを設定。
-                    // SetStreamPipe2D の後に設定すること(SetStreamPipe がタイムアウトを戻すため)。
-                    Ftd3Native.FT_SetPipeTimeout(_handle, BulkIn, StreamReadTimeoutMs);
-                    _expectedFrameSize = 0; // 再接続ごとに整列長を学習し直す
+                    OpenHandle(cancellationToken);
+                    Spi3dsCcStuff(cancellationToken);
+                    Load3dsCcFirmware(1, cancellationToken);
+                    Read3dsConfig3d(cancellationToken);
+                    SetStreamPipe2D(cancellationToken);
                     return;
+                }
+                catch (OperationCanceledException)
+                {
+                    // Cancellation is cooperative: only this worker owns/closes the handle.
+                    CloseHandle();
+                    throw;
                 }
                 catch (Capture3DSException ex)
                 {
                     // 途中の SPI 失敗で PreemptiveClose 済みのこともあるが、確実に閉じてやり直す。
                     last = ex;
-                    ForceClose();
+                    bool closeFailed = _closeFailed;
+                    CloseHandle();
+                    // Even if a cleanup attempt succeeds now, surface the preceding
+                    // close failure instead of silently opening another session.
+                    if (closeFailed) throw;
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (attempt < ConnectAttempts)
-                        Thread.Sleep(ConnectRetrySleepMs);
+                        Wait(ConnectRetrySleepMs, cancellationToken);
                 }
             }
             throw last ?? new Capture3DSException("connect failed");
         }
 
-        /// <summary>例外を投げずに両パイプを Abort してハンドルを閉じる(リトライ前の後始末)。</summary>
-        private void ForceClose()
-        {
-            if (_handle == IntPtr.Zero) return;
-            try { Ftd3Native.FT_AbortPipe(_handle, BulkIn); } catch { }
-            try { Ftd3Native.FT_AbortPipe(_handle, BulkOut); } catch { }
-            try { Ftd3Native.FT_Close(_handle); } catch { }
-            _handle = IntPtr.Zero;
-        }
-
         public Capture3DSFrame ReadFrame()
+            => ReadFrame(CancellationToken.None);
+
+        public Capture3DSFrame ReadFrame(CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             EnsureOpen();
-            // ホスト読みが遅れて FIFO が溢れると、デバイスは短パケット(フレーム境界)を早めに
-            // 出してフレームを切り詰める。その読みは整列長より短く=映像が縦ずれ・色ずれする。
-            // 重要: その短い読みも短パケットで終端されているので、次の読みは自然にフレーム先頭へ
-            // 再整列する(AbortPipe は不要。むしろブロッキング読みを無限待ちにしてハングする)。
-            // したがって整列長と一致しないフレームは「捨ててもう一度読む」だけでよい。
-            // 整列長に一致したフレームだけをデコードして返す。
-            uint reseedSize = 0;   // 直近の不一致長(同じ長さが連続すればデバイスが恒久的に
-            int reseedCount = 0;   // フレーム長を変えた=3D切替等とみなし整列長を学習し直す)
+            // Audio sample counts may change from packet to packet. Learning an
+            // exact video+audio byte count drops valid PCM whenever its tail
+            // changes. Use the narrower official 3ds_capture 6.1 acceptance
+            // range and complete 32-bit stereo pairs at the USB boundary.
+            // Invalid short/full/misaligned reads remain bounded retries, not
+            // AbortPipe/reconnect: the next short-packet read can realign safely.
             for (int attempt = 0; attempt < RawFrameReadAttempts; attempt++)
             {
-                int status = Ftd3Native.FT_ReadPipe(_handle, BulkIn, _frameBuffer,
-                    (uint)CaptureSize2D, out uint transferred, IntPtr.Zero);
-                if (Ftd3Native.Failed(status))
-                {
-                    // I/O 保留/未完了は一過性。パイプを整えてもう一度読む。
-                    if (Ftd3Native.IsTransient(status))
-                    {
-                        Ftd3Native.FT_AbortPipe(_handle, BulkIn);
-                        Ftd3Native.FT_SetStreamPipe(_handle, false, false, BulkIn, (uint)CaptureSize2D);
-                        continue;
-                    }
-                    throw new Capture3DSException($"FT_ReadPipe failed: 0x{status:X}");
-                }
+                cancellationToken.ThrowIfCancellationRequested();
+                // Keep USB reads queued while the caller decodes/displays this
+                // frame. Sync read -> decode -> display -> next sync read loses
+                // N3DS audio packets under ordinary NX preview load.
+                if (_readPipeline == null) _readPipeline = new Ftd3ReadPipeline(_handle, BulkIn, CaptureSize2D);
+                uint transferred = _readPipeline.Read(_frameBuffer, cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
 
-                if (transferred < VideoSize2D)
-                    continue; // 映像分に満たない切り詰めフレーム。捨てて読み直す(次は再整列する)。
-
-                if (_expectedFrameSize == 0)
-                {
-                    // 接続後の最初の正常フレームで整列長を学習。
-                    _expectedFrameSize = transferred;
-                    return N3dsxlDecoder.DecodeRgb8_2D(_frameBuffer, (int)transferred);
-                }
-
-                if (transferred == _expectedFrameSize)
-                    return N3dsxlDecoder.DecodeRgb8_2D(_frameBuffer, (int)transferred);
-
-                // 整列長と不一致 = ミスアライン。捨てて読み直す。ただし同じ長さが連続するなら
-                // デバイスが恒久的にフレーム長を変えた(3D 切替等)とみなして整列長を更新する。
-                if (transferred == reseedSize && ++reseedCount >= 3)
-                {
-                    _expectedFrameSize = transferred;
-                    return N3dsxlDecoder.DecodeRgb8_2D(_frameBuffer, (int)transferred);
-                }
-                if (transferred != reseedSize) { reseedSize = transferred; reseedCount = 1; }
+                if (!IsUsableFrameLength(transferred)) continue;
+                return N3dsxlDecoder.DecodeRgb8_2D(_frameBuffer, (int)transferred);
             }
             // 16 回読んでも整列フレームが得られない = 信号喪失(本体電源OFF/映像なし)か
             // 一時的な整列乱れ。ここで例外を投げると上位ループがデバイスを破棄して再接続するが、
@@ -234,23 +213,35 @@ namespace Capture3DS.Ftd3
             return null;
         }
 
+        private static bool IsUsableFrameLength(uint transferred)
+        {
+            // Static inspection of official 3ds_capture.exe 6.1, N3DS read
+            // completion at 0x40a020: inclusive 0x7f178..0x7f8fc, PCM at
+            // 0x7e900, (length - 0x7e900) / 4 stereo pairs. This is only a
+            // conservative length guard, not proof of arbitrary RGB alignment
+            // or equivalence to its 12-overlapped-read acquisition pipeline.
+            return transferred >= 520568
+                && transferred <= 522492
+                && (transferred & 3) == 0;
+        }
+
         /// <summary>
         /// 診断用: 1 回の FT_ReadPipe(CaptureSize2D)を行い、デコードせず転送長を返す。
-        /// 一過性(0x20/0x21)はパイプを張り直して 0 を返す(その読みは無効)。
-        /// 縦ずれの切り分け: 正常フレームは映像+音声=≒553472 で短パケット終端されるはず。
+        /// 一過性(0x18/0x19)はパイプを張り直して 0 を返す(その読みは無効)。
+        /// 正常な短パケット終端の転送長も、そのフレームに含まれる音声サンプル数で変化する。
         /// 毎回 CaptureSize2D=555008 が返るなら、フレーム境界で区切れず連結読み=整列崩れ。
         /// </summary>
         public uint ReadRawTransferSize()
         {
             EnsureOpen();
+            EnsureDiagnosticReadMode();
             int status = Ftd3Native.FT_ReadPipe(_handle, BulkIn, _frameBuffer,
                 (uint)CaptureSize2D, out uint transferred, IntPtr.Zero);
             if (Ftd3Native.Failed(status))
             {
                 if (Ftd3Native.IsTransient(status))
                 {
-                    Ftd3Native.FT_AbortPipe(_handle, BulkIn);
-                    Ftd3Native.FT_SetStreamPipe(_handle, false, false, BulkIn, (uint)CaptureSize2D);
+                    RecoverStreamPipe(CancellationToken.None);
                     return 0;
                 }
                 throw new Capture3DSException($"FT_ReadPipe failed: 0x{status:X}");
@@ -264,97 +255,104 @@ namespace Capture3DS.Ftd3
 
         /// <summary>
         /// 診断用: 1 回だけ FT_ReadPipe して転送長を out で返し、有効ならデコードして返す。
-        /// 一過性(0x20/0x21)はパイプを張り直して transferred=0/null を返す。
+        /// 一過性(0x18/0x19)はパイプを張り直して transferred=0/null を返す。
         /// ReadFrame のリトライ無し版。連続ループでの転送長と縦ずれを対応づけるのに使う。
         /// </summary>
         public Capture3DSFrame ReadFrameDiagnostic(out uint transferred)
         {
             EnsureOpen();
+            EnsureDiagnosticReadMode();
             int status = Ftd3Native.FT_ReadPipe(_handle, BulkIn, _frameBuffer,
                 (uint)CaptureSize2D, out transferred, IntPtr.Zero);
             if (Ftd3Native.Failed(status))
             {
                 if (Ftd3Native.IsTransient(status))
                 {
-                    Ftd3Native.FT_AbortPipe(_handle, BulkIn);
-                    Ftd3Native.FT_SetStreamPipe(_handle, false, false, BulkIn, (uint)CaptureSize2D);
+                    RecoverStreamPipe(CancellationToken.None);
                     transferred = 0;
                     return null;
                 }
                 throw new Capture3DSException($"FT_ReadPipe failed: 0x{status:X}");
             }
-            if (transferred < VideoSize2D)
+            if (!IsUsableFrameLength(transferred))
                 return null;
             return N3dsxlDecoder.DecodeRgb8_2D(_frameBuffer, (int)transferred);
         }
 
         // ---- 接続シーケンス（cc3dsfs connect_ftd3 / ponkan n3dsxl.connect 準拠） ----
 
-        private void DrainData()
+        private void DrainData(CancellationToken cancellationToken)
         {
             // cc3dsfs drain_data 準拠: 開いたばかりのハンドルへ SPI アクセスを有効化し、
             // 残データを 1 回だけ(有限タイムアウトで)読み捨てる。
             // 注意: 以前は冒頭で両パイプを FT_AbortPipe していたが、開いた直後のハンドル
             // (特に前セッションがまだ完全に解放されていない再接続時)への abort が
             // タイムアウトの効かないカーネル呼び出しで永久ブロック=プロセスのゾンビ化を
-            // 招いていたため撤去。0x20 等の一過性失敗は Connect 側のリトライで回復させる。
-            SetSpiAccess(true, ignoreError: true);
+            // 招いていたため撤去。ドレインの失敗は後続の再オープンと Connect 側で扱う。
+            SetSpiAccess(true, cancellationToken, ignoreError: true);
             var buf = new byte[0x100000];
             uint transferred;
-            Ftd3Native.FT_SetPipeTimeout(_handle, BulkIn, CfgWaitMs);
+            SetPipeTimeout(BulkIn, CfgWaitMs, cancellationToken);
             Ftd3Native.FT_ReadPipe(_handle, BulkIn, buf, (uint)buf.Length, out transferred, IntPtr.Zero); // 結果は無視
-            Thread.Sleep(CfgWaitMs);
+            Wait(CfgWaitMs, cancellationToken);
         }
 
-        private void Spi3dsCcStuff()
+        private void Spi3dsCcStuff(CancellationToken cancellationToken)
         {
-            SetSpiAccess(true);
-            Write(BulkOut, new byte[] { 0x80, 0x01, 0xAB, 0x00 });
-            Write(BulkOut, new byte[] { 0x90, 0x08, 0x03, 0x02, 0x00, 0x00, 0x00, 0x00 });
-            Read(BulkIn, 0x10);
-            Write(BulkOut, new byte[] { 0x80, 0x01, 0xAB, 0x00 });
-            SetSpiAccess(false);
+            SetSpiAccess(true, cancellationToken);
+            Write(BulkOut, new byte[] { 0x80, 0x01, 0xAB, 0x00 }, cancellationToken);
+            Write(BulkOut, new byte[] { 0x90, 0x08, 0x03, 0x02, 0x00, 0x00, 0x00, 0x00 }, cancellationToken);
+            Read(BulkIn, 0x10, cancellationToken);
+            Write(BulkOut, new byte[] { 0x80, 0x01, 0xAB, 0x00 }, cancellationToken);
+            SetSpiAccess(false, cancellationToken);
         }
 
-        private void Load3dsCcFirmware(byte firmwareId)
+        private void Load3dsCcFirmware(byte firmwareId, CancellationToken cancellationToken)
         {
             if (firmwareId >= 2) firmwareId = 1;
-            SetSpiAccess(true);
-            Write(BulkOut, new byte[] { (byte)(0x42 + firmwareId), 0x00, 0x00, 0x00 });
-            Thread.Sleep(CfgWaitMs);
-            SetSpiAccess(false);
+            SetSpiAccess(true, cancellationToken);
+            Write(BulkOut, new byte[] { (byte)(0x42 + firmwareId), 0x00, 0x00, 0x00 }, cancellationToken);
+            Wait(CfgWaitMs, cancellationToken);
+            SetSpiAccess(false, cancellationToken);
         }
 
-        private void Read3dsConfig3d()
+        private void Read3dsConfig3d(CancellationToken cancellationToken)
         {
-            SetSpiAccess(true);
-            Write(BulkOut, new byte[] { 0x98, 0x05, 0x9F, 0x00 });
-            Read(BulkIn, 0x10);
-            SetSpiAccess(false);
+            SetSpiAccess(true, cancellationToken);
+            Write(BulkOut, new byte[] { 0x98, 0x05, 0x9F, 0x00 }, cancellationToken);
+            Read(BulkIn, 0x10, cancellationToken);
+            SetSpiAccess(false, cancellationToken);
         }
 
-        private void SetStreamPipe2D()
+        private void SetStreamPipe2D(CancellationToken cancellationToken)
         {
-            SetStreamPipe(BulkIn, CaptureSize2D);
-            AbortPipe(BulkIn);
-            SetStreamPipe(BulkIn, CaptureSize2D);
+            SetStreamPipe(BulkIn, CaptureSize2D, cancellationToken);
+            RecoverStreamPipe(cancellationToken);
         }
 
-        private void SetSpiAccess(bool enable, bool ignoreError = false)
+        private void RecoverStreamPipe(CancellationToken cancellationToken)
+        {
+            AbortPipe(BulkIn, cancellationToken);
+            SetStreamPipe(BulkIn, CaptureSize2D, cancellationToken);
+        }
+
+        private void SetSpiAccess(bool enable, CancellationToken cancellationToken, bool ignoreError = false)
         {
             var buf = new byte[] { 0x40, (byte)(enable ? 0x80 : 0x00), 0x00, 0x00 };
-            Write(BulkOut, buf, ignoreError);
+            Write(BulkOut, buf, cancellationToken, ignoreError);
         }
 
         // ---- 低レベルラッパ ----
 
-        private void OpenHandle()
+        private void OpenHandle(CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             // 本体の電源OFF→ONやケーブル抜き差しでデバイスが再列挙されると、FTD3XX
             // ドライバ内部のデバイステーブルが古いまま残り、シリアル指定の FT_Create が
             // FT_DEVICE_NOT_OPENED(0x3)で失敗する。FT_Create の前にこれを呼んでテーブルを
             // 作り直すと、再列挙後の同一デバイスをそのまま開き直せる(=再接続が復帰する)。
             Ftd3Native.FT_CreateDeviceInfoList(out _);
+            cancellationToken.ThrowIfCancellationRequested();
 
             byte[] serial = Encoding.ASCII.GetBytes((Info.Serial ?? string.Empty) + "\0");
             IntPtr h;
@@ -362,14 +360,29 @@ namespace Capture3DS.Ftd3
             if (Ftd3Native.Failed(status) || h == IntPtr.Zero)
                 throw new Capture3DSException($"FT_Create failed: 0x{status:X}");
             _handle = h;
+            cancellationToken.ThrowIfCancellationRequested();
         }
 
         private void CloseHandle()
         {
             if (_handle != IntPtr.Zero)
             {
-                Ftd3Native.FT_Close(_handle);
+                if (_readPipeline != null)
+                {
+                    _readPipeline.Dispose();
+                    _readPipeline = null;
+                }
+                // Queued reads have already completed/released above. FT_Close
+                // is not used as an in-flight buffer lifetime barrier. A failed
+                // close must not be followed by opening a second session.
+                int status = Ftd3Native.FT_Close(_handle);
+                if (Ftd3Native.Failed(status))
+                {
+                    _closeFailed = true;
+                    throw new Capture3DSException($"FT_Close failed: 0x{status:X}");
+                }
                 _handle = IntPtr.Zero;
+                _closeFailed = false;
             }
         }
 
@@ -379,12 +392,19 @@ namespace Capture3DS.Ftd3
                 throw new Capture3DSException("device is not connected");
         }
 
-        private void Write(byte pipe, byte[] data, bool ignoreError = false)
+        private void EnsureDiagnosticReadMode()
+        {
+            if (_readPipeline != null)
+                throw new Capture3DSException("Synchronous diagnostics cannot run after queued capture has started; dispose and reconnect first.");
+        }
+
+        private void Write(byte pipe, byte[] data, CancellationToken cancellationToken, bool ignoreError = false)
         {
             EnsureOpen();
-            Ftd3Native.FT_SetPipeTimeout(_handle, pipe, CommandTimeoutMs);
+            SetPipeTimeout(pipe, CommandTimeoutMs, cancellationToken);
             uint transferred;
             int status = Ftd3Native.FT_WritePipe(_handle, pipe, data, (uint)data.Length, out transferred, IntPtr.Zero);
+            cancellationToken.ThrowIfCancellationRequested();
             if (!ignoreError && (Ftd3Native.Failed(status) || transferred != data.Length))
             {
                 PreemptiveClose();
@@ -392,25 +412,27 @@ namespace Capture3DS.Ftd3
             }
         }
 
-        private byte[] Read(byte pipe, int length)
+        private byte[] Read(byte pipe, int length, CancellationToken cancellationToken)
         {
             EnsureOpen();
-            Ftd3Native.FT_SetPipeTimeout(_handle, pipe, CommandTimeoutMs);
+            SetPipeTimeout(pipe, CommandTimeoutMs, cancellationToken);
             var buf = new byte[length];
             uint transferred = 0;
             int status = 0;
             // I/O 保留(FT_IO_PENDING 等)は一過性。数回リトライしてから諦める。
             for (int attempt = 0; attempt < ReadRetryAttempts; attempt++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 status = Ftd3Native.FT_ReadPipe(_handle, pipe, buf, (uint)length, out transferred, IntPtr.Zero);
+                cancellationToken.ThrowIfCancellationRequested();
                 if (!Ftd3Native.Failed(status)) break;
                 if (!Ftd3Native.IsTransient(status))
                 {
                     PreemptiveClose();
                     throw new Capture3DSException($"FT_ReadPipe(0x{pipe:X}) failed: 0x{status:X}");
                 }
-                Ftd3Native.FT_AbortPipe(_handle, pipe);
-                Thread.Sleep(ReadRetrySleepMs);
+                AbortPipe(pipe, cancellationToken);
+                Wait(ReadRetrySleepMs, cancellationToken);
             }
             if (Ftd3Native.Failed(status))
             {
@@ -426,43 +448,59 @@ namespace Capture3DS.Ftd3
             return buf;
         }
 
-        private void SetStreamPipe(byte pipe, int length)
+        private void SetStreamPipe(byte pipe, int length, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             int status = Ftd3Native.FT_SetStreamPipe(_handle, false, false, pipe, (uint)length);
+            cancellationToken.ThrowIfCancellationRequested();
             if (Ftd3Native.Failed(status))
             {
                 PreemptiveClose();
                 throw new Capture3DSException($"FT_SetStreamPipe(0x{pipe:X}) failed: 0x{status:X}");
             }
+            // FT_SetStreamPipe may reset the timeout. Every configuration/recovery
+            // must restore a finite timeout successfully before the next read.
+            SetPipeTimeout(pipe, StreamReadTimeoutMs, cancellationToken);
         }
 
-        private void AbortPipe(byte pipe)
+        private void SetPipeTimeout(byte pipe, uint timeoutMs, CancellationToken cancellationToken)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            int status = Ftd3Native.FT_SetPipeTimeout(_handle, pipe, timeoutMs);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Ftd3Native.Failed(status))
+                throw new Capture3DSException($"FT_SetPipeTimeout(0x{pipe:X}) failed: 0x{status:X}");
+        }
+
+        private void AbortPipe(byte pipe, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
             Ftd3Native.FT_AbortPipe(_handle, pipe); // 失敗は致命ではないので無視
+            cancellationToken.ThrowIfCancellationRequested();
         }
 
         private void PreemptiveClose()
         {
-            if (_handle != IntPtr.Zero)
-            {
-                Ftd3Native.FT_AbortPipe(_handle, BulkIn);
-                Ftd3Native.FT_Close(_handle);
-                _handle = IntPtr.Zero;
-            }
+            CloseHandle();
         }
 
         public void Dispose()
         {
-            // cc3dsfs end_connection 準拠で FT_Close のみ。以前は閉じる前に BulkIn を
+            // 先行読み取りの完了・解放後に FT_Close。以前は閉じる前に BulkIn を
             // FT_AbortPipe していたが、ストリーミング中のパイプへの abort がタイムアウトの
             // 効かないカーネル呼び出しでブロックすると、ハンドルが閉じずデバイスがビジーの
-            // まま残り、次の接続が USB 抜き差し必須になっていた。FT_Close が内部で
-            // 保留 I/O を片付けるので abort は不要。
-            if (_handle != IntPtr.Zero)
-            {
-                Ftd3Native.FT_Close(_handle);
-                _handle = IntPtr.Zero;
-            }
+            // まま残り、次の接続が USB 抜き差し必須になっていた。先行 I/O は
+            // Close 前に自分で完了確認し、終了時の abort は追加しない。
+            CloseHandle();
+        }
+
+        private static void Wait(int milliseconds, CancellationToken cancellationToken)
+        {
+            if (!cancellationToken.CanBeCanceled)
+                Thread.Sleep(milliseconds);
+            else
+                cancellationToken.WaitHandle.WaitOne(milliseconds);
+            cancellationToken.ThrowIfCancellationRequested();
         }
 
         private static string CString(byte[] ansi)

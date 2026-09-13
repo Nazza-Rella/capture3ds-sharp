@@ -1,8 +1,12 @@
-# USB audio regression tests
+# USB capture regression tests
 
 These tests use synthetic USB packets only. They do not enumerate or open capture
 devices, load native USB libraries, record real audio, or start audio playback.
-Audio decoding is implemented, but playback on each physical board remains unverified.
+The tests do not establish hardware latency or sound quality. The short N3DSXL
+live-host check and the user's report of normal audio from a supported FTD2
+DS Capture Board, described in the repository README, are separate from these
+tests. The DS report does not cover every board generation. LL-SPA3 and original
+3DS board audio playback remain unverified on hardware.
 
 ## Run the source-only tests
 
@@ -29,6 +33,29 @@ powershell -ExecutionPolicy Bypass -File .\tests\test-audio.ps1 -AssemblyPath .\
 This also checks the DS transport's existing pure synchronization-trimming helpers
 against synthetic leading and trailing padding, for 138 assertions per build.
 No device object is constructed, and no native entry point is called.
+
+## N3DSXL queued-read and lifecycle tests
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\test-ftd3-reconnect.ps1
+powershell -ExecutionPolicy Bypass -File .\tests\test-ftd3-pipeline-failures.ps1
+```
+
+Both runners compile the current FTD3 source into fresh temporary directories
+with managed stand-ins for the native transport. They never enumerate or open
+USB devices. The reconnect runner separately compiles the real `Ftd3Native.cs`
+to verify status constants, the native OVERLAPPED layout, entry-point names and
+parameter marshaling by reflection, without calling any native function.
+
+Coverage includes the 12-slot ring, repeated wraparound, immediate/pending
+completion, copy-before-resubmit ownership, varying valid PCM tail lengths,
+short/oversized/misaligned frames, cancellation boundaries, finite timeout
+restoration, diagnostic/capture exclusion, partial startup, uncertain native
+errors, retained storage after cleanup failure, completion-before-release-before-
+close ordering, and retryable/idempotent disposal. A real managed deadline case
+spends approximately 2.5 seconds waiting for a deliberately incomplete fake read.
+The tests do not prove that a native driver call which never returns can be
+interrupted, nor that a disconnected physical board will recover automatically.
 
 ## Coverage and limits
 
@@ -58,3 +85,12 @@ The audio layout follows the MIT-licensed cc3dsfs revision
   `get_audio_n_samples`.
 - [`capture_structs.hpp`](https://github.com/Lorenzooone/cc3dsfs/blob/e58edc4d34002b095f8fd0cd4f60df532df25fb0/include/capture_structs.hpp):
   Optimize header/sample records and capture packet layouts.
+
+FTD3 native bindings and pending-request ownership were also checked against
+[FTDI AN_379](https://ftdichip.com/wp-content/uploads/2020/08/AN_379-D3xx-Programmers-Guide.pdf),
+the vendor header, and Microsoft's
+[OVERLAPPED](https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-overlapped)
+and [GetOverlappedResult](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getoverlappedresult)
+contracts. This library retains its existing `FT_ReadPipe` entry point with
+overlapped requests; it does not claim to reproduce every setting of the original
+viewer or change the installed FTDI driver.
