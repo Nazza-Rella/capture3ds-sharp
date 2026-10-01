@@ -360,12 +360,11 @@ namespace Capture3DS.Cypress
             }
         }
 
-        // cc3dsfs reads EP 0x82 as a continuous stream of fixed-size async slices
-        // (SINGLE_RING_BUFFER_SLICE_SIZE), keeping NUM_CONCURRENTLY_RUNNING_BUFFERS
-        // overlapped reads in flight at all times. The FX2 stalls if the pipeline
-        // ever drains; LlSpa3StreamReader keeps the ring full on its own thread.
-        private const int VideoSliceSize = 0x4000;
-        private const int PipelineDepth = 64;
+        // EP 0x82 is read as a continuous stream of 64 KiB overlapped reads, 16 of
+        // them (1 MiB) in flight at all times. The FX2 stalls if the pipeline ever
+        // drains; LlSpa3StreamReader keeps the ring full on its own thread.
+        private const int VideoSliceSize = 0x10000;
+        private const int PipelineDepth = 16;
 
         private sealed class PipeSlot
         {
