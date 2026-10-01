@@ -57,6 +57,25 @@ spends approximately 2.5 seconds waiting for a deliberately incomplete fake read
 The tests do not prove that a native driver call which never returns can be
 interrupted, nor that a disconnected physical board will recover automatically.
 
+## LL-SPA3 stream reader tests
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .	ests	est-llspa3-stream-reader.ps1
+```
+
+The runner compiles the real `LlSpa3StreamReader` with a managed-only slice
+endpoint. The CyUSB endpoint, P/Invoke declarations and native DLLs are excluded,
+and no USB device is opened. Synthetic RGB888 frames are cut into 16 KiB reads
+that start mid-frame.
+
+Coverage includes locking onto the column-0 header, normal and extra-header frame
+lengths, a failed transfer recovered in place (cancel, pipe reset, re-arm) without
+a fault, a silent gap dropped as one torn frame, dropping the oldest frames when
+the caller falls behind, repeated failures and silence reported as faults, arm
+failure at start, and prompt shutdown with the transfers cancelled on the reader
+thread. The tests do not show how a particular USB host controller reports
+transfer errors.
+
 ## Coverage and limits
 
 - Existing frame constructor compatibility; signed PCM16 stereo order and exact

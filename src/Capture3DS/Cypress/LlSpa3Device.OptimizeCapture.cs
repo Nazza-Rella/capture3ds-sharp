@@ -363,8 +363,7 @@ namespace Capture3DS.Cypress
         // cc3dsfs reads EP 0x82 as a continuous stream of fixed-size async slices
         // (SINGLE_RING_BUFFER_SLICE_SIZE), keeping NUM_CONCURRENTLY_RUNNING_BUFFERS
         // overlapped reads in flight at all times. The FX2 stalls if the pipeline
-        // ever drains, so we keep PipelineDepth reads armed and re-arm each slot
-        // immediately after collecting it.
+        // ever drains; LlSpa3StreamReader keeps the ring full on its own thread.
         private const int VideoSliceSize = 0x4000;
         private const int PipelineDepth = 64;
 
@@ -380,337 +379,180 @@ namespace Capture3DS.Cypress
             public bool InFlight;
         }
 
-        private PipeSlot[] _pipe;
-        private int _pipeHead;
-
-        // Byte-stream resync buffer. The FX2 free-runs and emits frames back-to-back
-        // as one continuous stream (cc3dsfs reads EP 0x82 the same way), so a session
-        // always begins mid-frame and slice 0 is never frame 0. We accumulate the
-        // stream here and scan for the column-0 header to lock onto the real frame
-        // boundary. Naive slice concatenation keeps a constant sub-frame offset that
-        // both rolls the image and (when the offset is not a multiple of 3) rotates
-        // the RGB channels - the split / duplicated / colour-swapped frame.
-        private const ushort OptimizeSyncMagic = 0xCC33;
-        private byte[] _stream = Array.Empty<byte>();
-        private int _streamLen;
-        private bool _synced;
+        private CyUsbSliceEndpoint _sliceEndpoint;
+        private LlSpa3StreamReader _reader;
 
         private void ArmOptimizePipeline()
         {
             TeardownOptimizePipeline();
             _bulkIn.XferSize = VideoSliceSize;
-            _pipe = new PipeSlot[PipelineDepth];
-            _pipeHead = 0;
-            _streamLen = 0;
-            _synced = false;
-            for (var i = 0; i < PipelineDepth; i++)
-            {
-                var slot = new PipeSlot();
-                var ovSize = Math.Max(CyConst.OverlapSignalAllocSize, Marshal.SizeOf(typeof(OVERLAPPED)));
-                slot.Ov = new byte[ovSize];
-                slot.OvHandle = GCHandle.Alloc(slot.Ov, GCHandleType.Pinned);
-                slot.Evt = PInvoke.CreateEvent(0, 0, 0, 0);
-                slot.Buf = new byte[VideoSliceSize];
-                var cmdLength = CyConst.SINGLE_XFER_LEN + ((_bulkIn.XferMode == XMODE.BUFFERED) ? VideoSliceSize : 0);
-                slot.Cmd = new byte[cmdLength];
-                // The kernel DMAs into Buf and reads/writes the SINGLE_TRANSFER in Cmd
-                // for the whole lifetime of the overlapped read. They must stay pinned
-                // (matches the official CyUSB Streamer sample) or GC compaction during
-                // an in-flight transfer corrupts the heap (ExecutionEngineException).
-                slot.BufHandle = GCHandle.Alloc(slot.Buf, GCHandleType.Pinned);
-                slot.CmdHandle = GCHandle.Alloc(slot.Cmd, GCHandleType.Pinned);
-                _pipe[i] = slot;
-                ArmSlot(slot);
-            }
-        }
-
-        private void ArmSlot(PipeSlot slot)
-        {
-            var ov = (OVERLAPPED)Marshal.PtrToStructure(slot.OvHandle.AddrOfPinnedObject(), typeof(OVERLAPPED));
-            ov.hEvent = slot.Evt;
-            Marshal.StructureToPtr(ov, slot.OvHandle.AddrOfPinnedObject(), true);
-
-            var len = VideoSliceSize;
-            if (!_bulkIn.BeginDataXfer(ref slot.Cmd, ref slot.Buf, ref len, ref slot.Ov))
-            {
-                slot.InFlight = false;
-                throw new Capture3DSException($"LL-SPA3 pipeline BeginDataXfer failed: lastError={_bulkIn.LastError}");
-            }
-
-            slot.InFlight = true;
-        }
-
-        // Wait for the oldest in-flight slice, copy it out, then re-arm that slot
-        // and advance the ring head so the pipeline stays full.
-        private int CollectOptimizeSlice(byte[] dest, int destOffset, int timeoutMs)
-        {
-            var slot = _pipe[_pipeHead];
-            if (!_bulkIn.WaitForXfer(slot.Evt, (uint)timeoutMs))
-            {
-                _bulkIn.Abort();
-                PInvoke.WaitForSingleObject(slot.Evt, 500);
-                throw new Capture3DSException($"LL-SPA3 pipeline slice timed out: lastError={_bulkIn.LastError}");
-            }
-
-            var len = 0;
-            if (!_bulkIn.FinishDataXfer(ref slot.Cmd, ref slot.Buf, ref len, ref slot.Ov) || len < 0)
-            {
-                throw new Capture3DSException($"LL-SPA3 pipeline FinishDataXfer failed: length={len} lastError={_bulkIn.LastError}");
-            }
-
-            if (len > 0)
-            {
-                Buffer.BlockCopy(slot.Buf, 0, dest, destOffset, len);
-            }
-
-            ArmSlot(slot);
-            _pipeHead = (_pipeHead + 1) % PipelineDepth;
-            return len;
-        }
-
-        // Pull one aligned frame out of the continuous slice stream. Like cc3dsfs's
-        // not-synchronized / synchronized state machine, we first scan for a column-0
-        // header to find the frame boundary, then return exactly targetLength bytes
-        // starting there. Every subsequent frame is re-verified at offset 0 and we
-        // fall back to a rescan if the header is missing, so a dropped slice cannot
-        // permanently shear the video.
-        private byte[] ReadOptimizeFrameFromPipeline(int timeoutMs)
-        {
-            while (true)
-            {
-                if (!_synced)
-                {
-                    var pos = FindFrameStart(_stream, _streamLen);
-                    if (pos < 0)
-                    {
-                        // No header yet. Drop everything except a short even-length
-                        // tail (a header may straddle the slice boundary) and pull
-                        // more data. Keeping the shift even preserves 16-bit header
-                        // alignment, matching cc3dsfs's i*2 scan.
-                        var keep = _streamLen >= 4 ? 4 : (_streamLen & ~1);
-                        ShiftStream(_streamLen - keep);
-                        FillMoreSlices(timeoutMs);
-                        continue;
-                    }
-
-                    ShiftStream(pos);
-                    _synced = true;
-                }
-
-                while (_streamLen < 4)
-                {
-                    FillMoreSlices(timeoutMs);
-                }
-
-                // The column-0 header states whether this frame carries the extra
-                // 401st column instead of the header-less trailing block, which
-                // changes the frame length by one column header.
-                var targetLength = LlSpa3Decoder.HasExtraHeaderColumn(_stream, 0)
-                    ? LlSpa3Decoder.ExtraHeaderFrameSize
-                    : LlSpa3Decoder.FrameSize;
-
-                while (_streamLen < targetLength)
-                {
-                    FillMoreSlices(timeoutMs);
-                }
-
-                if (!IsFrameStart(_stream, 0))
-                {
-                    // Lost alignment (e.g. a slice was short). Re-scan from scratch.
-                    _synced = false;
-                    continue;
-                }
-
-                if (!IsFrameInternallyAligned(_stream, 0, targetLength == LlSpa3Decoder.ExtraHeaderFrameSize))
-                {
-                    // A mid-frame stream gap sheared the later columns even though the
-                    // offset-0 header still matches. Step past this false start so the
-                    // rescan locks onto the next genuine column-0 boundary; the torn
-                    // frame is dropped (caller keeps the previous frame) rather than
-                    // shown with garbled right-side columns.
-                    ShiftStream(2);
-                    _synced = false;
-                    continue;
-                }
-
-                var frame = new byte[targetLength];
-                Buffer.BlockCopy(_stream, 0, frame, 0, targetLength);
-                ShiftStream(targetLength);
-                return frame;
-            }
-        }
-
-        // cc3dsfs get_is_pos_first_synch_in_buffer (non-old-firmware path). Our board
-        // runs the new firmware (bcd 0xFD00): every column begins with the 16-bit
-        // SYNCH_VALUE_OPTIMIZE magic 0xCC33, followed by a column_info word whose low
-        // 10 bits are the column index. Frame start is column 0. Verified against a
-        // raw EP 0x82 dump: column-0 hits land exactly FrameSize (583840) apart.
-        private static bool IsFrameStart(byte[] buf, int pos)
-        {
-            var magic = (ushort)(buf[pos] | (buf[pos + 1] << 8));
-            if (magic != OptimizeSyncMagic)
-            {
-                return false;
-            }
-
-            var columnInfo = (ushort)(buf[pos + 2] | (buf[pos + 3] << 8));
-            return (columnInfo & 0x3FF) == 0;
-        }
-
-        private static int FindFrameStart(byte[] buf, int len)
-        {
-            for (var pos = 0; pos + 4 <= len; pos += 2)
-            {
-                if (IsFrameStart(buf, pos))
-                {
-                    return pos;
-                }
-            }
-
-            return -1;
-        }
-
-        // Every column 0..399 starts with magic 0xCC33 and a column_info word whose
-        // low 10 bits equal the column index (the trailing bottom-only block has no
-        // header; the extra-header frame ends with a full column 400 instead).
-        // The free-running EP 0x82 stream can lose a chunk mid-frame when the
-        // host pipeline re-arms a hair too late; that gap shifts every column after it,
-        // so the offset-0 header still matches while the later (right-side) columns are
-        // sheared. Verify all column headers before accepting the frame: a mismatch
-        // means the frame is torn, and we drop+resync instead of emitting garbage.
-        private const int SyncColumnStride = 1456;
-        private const int SyncColumnCount = 400;
-
-        private static bool IsFrameInternallyAligned(byte[] buf, int frameStart, bool hasExtraHeader)
-        {
-            var columnCount = hasExtraHeader ? SyncColumnCount + 1 : SyncColumnCount;
-            for (var col = 0; col < columnCount; col++)
-            {
-                var pos = frameStart + (col * SyncColumnStride);
-                var magic = (ushort)(buf[pos] | (buf[pos + 1] << 8));
-                if (magic != OptimizeSyncMagic)
-                {
-                    return false;
-                }
-
-                var columnInfo = (ushort)(buf[pos + 2] | (buf[pos + 3] << 8));
-                if ((columnInfo & 0x3FF) != col)
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        private void FillMoreSlices(int timeoutMs)
-        {
-            EnsureStreamCapacity(_streamLen + VideoSliceSize);
-            _streamLen += CollectOptimizeSlice(_stream, _streamLen, timeoutMs);
-        }
-
-        private void EnsureStreamCapacity(int needed)
-        {
-            if (_stream.Length >= needed)
-            {
-                return;
-            }
-
-            var newCap = _stream.Length == 0 ? needed : _stream.Length;
-            while (newCap < needed)
-            {
-                newCap *= 2;
-            }
-
-            var bigger = new byte[newCap];
-            Buffer.BlockCopy(_stream, 0, bigger, 0, _streamLen);
-            _stream = bigger;
-        }
-
-        private void ShiftStream(int n)
-        {
-            if (n <= 0)
-            {
-                return;
-            }
-
-            if (n >= _streamLen)
-            {
-                _streamLen = 0;
-                return;
-            }
-
-            Buffer.BlockCopy(_stream, n, _stream, 0, _streamLen - n);
-            _streamLen -= n;
+            _sliceEndpoint = new CyUsbSliceEndpoint(_bulkIn, PipelineDepth, VideoSliceSize);
+            _reader = new LlSpa3StreamReader(_sliceEndpoint, TimeoutMs);
+            _reader.Start();
         }
 
         private void TeardownOptimizePipeline()
         {
-            if (_pipe == null)
+            if (_reader != null)
+            {
+                // Throws if the reader thread does not stop. The slot buffers then
+                // stay pinned, because its transfers may still be in flight.
+                _reader.Dispose();
+                _reader = null;
+            }
+
+            if (_sliceEndpoint == null)
             {
                 return;
             }
 
-            // Stop any in-flight DMA before unpinning so the kernel is not still
-            // writing into a buffer we are about to release.
-            if (_bulkIn != null)
-            {
-                try { _bulkIn.Abort(); } catch { }
-            }
-
-            // Drain the cancelled IRPs: Abort() only requests cancellation, so the
-            // overlapped reads are still pending in the kernel. If we close/reopen the
-            // device handle before they finish, the first command on the freshly
-            // opened pipe returns ERROR_IO_PENDING (997) and reconnect fails. Wait for
-            // each in-flight slot's event to signal (completion of the cancelled IRP)
-            // before unpinning, then reset the pipe so it is settled for the next open.
-            foreach (var slot in _pipe)
-            {
-                if (slot != null && slot.InFlight && slot.Evt != IntPtr.Zero)
-                {
-                    PInvoke.WaitForSingleObject(slot.Evt, 500);
-                    slot.InFlight = false;
-                }
-            }
-
+            // Drain any cancelled IRPs before the handle is closed or reopened: a
+            // read still pending in the kernel makes the first command on a freshly
+            // opened pipe return ERROR_IO_PENDING (997) and reconnect fails.
+            _sliceEndpoint.CancelAll();
             if (_bulkIn != null)
             {
                 try { _bulkIn.Reset(); } catch { }
             }
 
-            foreach (var slot in _pipe)
+            _sliceEndpoint.Dispose();
+            _sliceEndpoint = null;
+        }
+
+        // Overlapped CyUSB reads on EP 0x82. The kernel DMAs into Buf and updates
+        // the SINGLE_TRANSFER in Cmd for the whole lifetime of a transfer, so both
+        // stay pinned (matches the official CyUSB Streamer sample) until the
+        // transfer is confirmed complete; GC compaction during an in-flight
+        // transfer corrupts the heap (ExecutionEngineException).
+        private sealed class CyUsbSliceEndpoint : ILlSpa3SliceEndpoint, IDisposable
+        {
+            private const int CancelDrainMs = 2000;
+            private const int WaitObject0 = 0;
+
+            private readonly CyBulkEndPoint _endpoint;
+            private readonly PipeSlot[] _slots;
+            private bool _transfersUnconfirmed;
+
+            internal CyUsbSliceEndpoint(CyBulkEndPoint endpoint, int slotCount, int sliceSize)
             {
-                if (slot == null)
+                _endpoint = endpoint;
+                _slots = new PipeSlot[slotCount];
+                var ovSize = Math.Max(CyConst.OverlapSignalAllocSize, Marshal.SizeOf(typeof(OVERLAPPED)));
+                var cmdLength = CyConst.SINGLE_XFER_LEN + ((endpoint.XferMode == XMODE.BUFFERED) ? sliceSize : 0);
+                for (var i = 0; i < slotCount; i++)
                 {
-                    continue;
-                }
-
-                if (slot.BufHandle.IsAllocated)
-                {
-                    slot.BufHandle.Free();
-                }
-
-                if (slot.CmdHandle.IsAllocated)
-                {
-                    slot.CmdHandle.Free();
-                }
-
-                if (slot.OvHandle.IsAllocated)
-                {
-                    slot.OvHandle.Free();
-                }
-
-                if (slot.Evt != IntPtr.Zero)
-                {
-                    PInvoke.CloseHandle(slot.Evt);
-                    slot.Evt = IntPtr.Zero;
+                    var slot = new PipeSlot();
+                    slot.Ov = new byte[ovSize];
+                    slot.OvHandle = GCHandle.Alloc(slot.Ov, GCHandleType.Pinned);
+                    slot.Evt = PInvoke.CreateEvent(0, 0, 0, 0);
+                    slot.Buf = new byte[sliceSize];
+                    slot.BufHandle = GCHandle.Alloc(slot.Buf, GCHandleType.Pinned);
+                    slot.Cmd = new byte[cmdLength];
+                    slot.CmdHandle = GCHandle.Alloc(slot.Cmd, GCHandleType.Pinned);
+                    _slots[i] = slot;
                 }
             }
 
-            _pipe = null;
-            _pipeHead = 0;
-            _streamLen = 0;
-            _synced = false;
+            public int SlotCount => _slots.Length;
+
+            public byte[] SlotBuffer(int slot) => _slots[slot].Buf;
+
+            public bool Arm(int slot)
+            {
+                var s = _slots[slot];
+                var ovPtr = s.OvHandle.AddrOfPinnedObject();
+                var ov = (OVERLAPPED)Marshal.PtrToStructure(ovPtr, typeof(OVERLAPPED));
+                ov.hEvent = s.Evt;
+                Marshal.StructureToPtr(ov, ovPtr, true);
+
+                var len = s.Buf.Length;
+                s.InFlight = _endpoint.BeginDataXfer(ref s.Cmd, ref s.Buf, ref len, ref s.Ov);
+                return s.InFlight;
+            }
+
+            public bool Wait(int slot, int timeoutMs)
+            {
+                return _endpoint.WaitForXfer(_slots[slot].Evt, (uint)timeoutMs);
+            }
+
+            public bool Finish(int slot, out int length)
+            {
+                var s = _slots[slot];
+                var len = 0;
+                var ok = _endpoint.FinishDataXfer(ref s.Cmd, ref s.Buf, ref len, ref s.Ov);
+                s.InFlight = false;
+                length = len;
+                return ok && len >= 0;
+            }
+
+            public void CancelAll()
+            {
+                try { _endpoint.Abort(); } catch { }
+
+                // Abort() only requests cancellation; wait for each cancelled read
+                // to complete before its buffer may be reused or released.
+                var deadline = Environment.TickCount + CancelDrainMs;
+                foreach (var s in _slots)
+                {
+                    if (s == null || !s.InFlight)
+                    {
+                        continue;
+                    }
+
+                    var remaining = Math.Max(0, deadline - Environment.TickCount);
+                    if (PInvoke.WaitForSingleObject(s.Evt, (uint)remaining) != WaitObject0)
+                    {
+                        _transfersUnconfirmed = true;
+                    }
+
+                    s.InFlight = false;
+                }
+            }
+
+            public void ResetPipe()
+            {
+                try { _endpoint.Reset(); } catch { }
+            }
+
+            public void Dispose()
+            {
+                // A read whose completion was never observed may still own its
+                // buffer. Leaking it is safer than letting the kernel write into
+                // released memory.
+                if (_transfersUnconfirmed)
+                {
+                    return;
+                }
+
+                foreach (var s in _slots)
+                {
+                    if (s == null)
+                    {
+                        continue;
+                    }
+
+                    if (s.BufHandle.IsAllocated)
+                    {
+                        s.BufHandle.Free();
+                    }
+
+                    if (s.CmdHandle.IsAllocated)
+                    {
+                        s.CmdHandle.Free();
+                    }
+
+                    if (s.OvHandle.IsAllocated)
+                    {
+                        s.OvHandle.Free();
+                    }
+
+                    if (s.Evt != IntPtr.Zero)
+                    {
+                        PInvoke.CloseHandle(s.Evt);
+                        s.Evt = IntPtr.Zero;
+                    }
+                }
+            }
         }
     }
 }

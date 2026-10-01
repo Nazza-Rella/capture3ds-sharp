@@ -222,8 +222,15 @@ namespace Capture3DS.Cypress
                 StartOptimizeNewCompatibleStream();
             }
 
-            var raw = ReadOptimizeFrameFromPipeline(TimeoutMs);
-            return LlSpa3Decoder.Decode(raw, raw.Length, _audioDecoder);
+            var raw = _reader.Take(TimeoutMs);
+            try
+            {
+                return LlSpa3Decoder.Decode(raw, raw.Length, _audioDecoder);
+            }
+            finally
+            {
+                _reader.Return(raw);
+            }
         }
 
         public void Dispose()
