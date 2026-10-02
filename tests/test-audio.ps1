@@ -18,7 +18,7 @@ if ($AssemblyPath) {
     $relativeSources = @(
         'Capture3DSFrame.cs','Capture3DSModel.cs','Capture3DSAudioDecoder.cs',
         'Ftd3\N3dsxlDecoder.cs','Ftd2\DsDecoder.cs','Loopy\LoopyOld3dsDecoder.cs',
-        'Cypress\LlSpa3Decoder.cs','Cypress\LlSpa3AudioDecoder.cs'
+        'Cypress\LlSpa3Decoder.cs','Cypress\LlSpa3AudioDecoder.cs','Cypress\LlSpa3FrameLayout.cs'
     )
     $sources = @($testSource) + @($relativeSources | ForEach-Object { Join-Path $sourceRoot $_ })
     # Device classes, P/Invoke declarations and all native DLLs are excluded.

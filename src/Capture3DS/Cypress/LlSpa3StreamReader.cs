@@ -52,6 +52,7 @@ namespace Capture3DS.Cypress
 
         private readonly ILlSpa3SliceEndpoint _endpoint;
         private readonly int _stallTimeoutMs;
+        private readonly LlSpa3FrameLayout _layout;
         private readonly object _sync = new object();
         private readonly Queue<byte[]> _frames = new Queue<byte[]>();
         private readonly Stack<byte[]> _pool = new Stack<byte[]>();
@@ -72,10 +73,11 @@ namespace Capture3DS.Cypress
         private long _tornFrames;
         private long _overflowDrops;
 
-        internal LlSpa3StreamReader(ILlSpa3SliceEndpoint endpoint, int stallTimeoutMs)
+        internal LlSpa3StreamReader(ILlSpa3SliceEndpoint endpoint, int stallTimeoutMs, LlSpa3FrameLayout layout)
         {
             _endpoint = endpoint ?? throw new ArgumentNullException(nameof(endpoint));
             _stallTimeoutMs = stallTimeoutMs;
+            _layout = layout ?? throw new ArgumentNullException(nameof(layout));
         }
 
         internal long TransferErrors => Interlocked.Read(ref _transferErrors);
@@ -301,7 +303,7 @@ namespace Capture3DS.Cypress
                 // The column-0 header states whether this frame carries the extra
                 // 401st column instead of the header-less trailing block.
                 var hasExtraHeader = LlSpa3Decoder.HasExtraHeaderColumn(_stream, 0);
-                var targetLength = hasExtraHeader ? LlSpa3Decoder.ExtraHeaderFrameSize : LlSpa3Decoder.FrameSize;
+                var targetLength = hasExtraHeader ? _layout.ExtraHeaderFrameSize : _layout.FrameSize;
                 if (_streamLen < targetLength)
                 {
                     return;
@@ -313,7 +315,7 @@ namespace Capture3DS.Cypress
                     continue;
                 }
 
-                if (!IsFrameInternallyAligned(_stream, 0, hasExtraHeader))
+                if (!IsFrameInternallyAligned(_stream, 0, hasExtraHeader, _layout.ColumnStride))
                 {
                     Interlocked.Increment(ref _tornFrames);
                     ShiftStream(2);
@@ -397,12 +399,12 @@ namespace Capture3DS.Cypress
         // A gap mid-frame shifts every later column, so the offset-0 header still
         // matches while the right-side columns are sheared. All column headers
         // must line up before the frame is accepted.
-        private static bool IsFrameInternallyAligned(byte[] buf, int frameStart, bool hasExtraHeader)
+        private static bool IsFrameInternallyAligned(byte[] buf, int frameStart, bool hasExtraHeader, int columnStride)
         {
             var columnCount = hasExtraHeader ? LlSpa3Decoder.NumColumns + 1 : LlSpa3Decoder.NumColumns;
             for (var col = 0; col < columnCount; col++)
             {
-                var pos = frameStart + (col * LlSpa3Decoder.ColumnStride);
+                var pos = frameStart + (col * columnStride);
                 var magic = (ushort)(buf[pos] | (buf[pos + 1] << 8));
                 if (magic != SyncMagic)
                 {

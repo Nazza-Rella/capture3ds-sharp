@@ -10,7 +10,8 @@ New-Item -ItemType Directory -Path $fixture | Out-Null
 $test = Join-Path $fixture 'LlSpa3StreamReaderTests.exe'
 $sources = @(Join-Path $PSScriptRoot 'LlSpa3StreamReaderTests.cs')
 foreach ($name in @('Capture3DSFrame.cs','Capture3DSModel.cs','Capture3DSAudioDecoder.cs',
-        'Cypress\LlSpa3Decoder.cs','Cypress\LlSpa3AudioDecoder.cs','Cypress\LlSpa3StreamReader.cs')) {
+        'Cypress\LlSpa3Decoder.cs','Cypress\LlSpa3AudioDecoder.cs','Cypress\LlSpa3FrameLayout.cs',
+        'Cypress\LlSpa3StreamReader.cs')) {
     $sources += Join-Path $sourceRoot $name
 }
 # The CyUSB endpoint, P/Invoke declarations and all native DLLs are excluded.

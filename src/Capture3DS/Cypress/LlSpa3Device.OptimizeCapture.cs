@@ -15,10 +15,17 @@ namespace Capture3DS.Cypress
     public sealed partial class LlSpa3Device
     {
         private const string Fpga888ResourceName = "Capture3DS.optimize_old_3ds_888_fpga_pl.bin";
+        private const string Fpga565ResourceName = "Capture3DS.optimize_old_3ds_565_fpga_pl.bin";
         private const int OptimizeEepromNewSize = 0x80;
         private const int OptimizeEepromOperationSize = 0x10;
 
         private static byte[] _fpga888Cache;
+        private static byte[] _fpga565Cache;
+
+        // Colour depth requested from the board at the next Connect().
+        public LlSpa3ColorMode ColorMode { get; set; } = LlSpa3ColorMode.Rgb565;
+
+        private LlSpa3FrameLayout _layout = LlSpa3FrameLayout.Rgb565;
 
         // Diagnostic only: true/false once capture_start has read the live device
         // id and compared it against the product key. Null if no key was supplied.
@@ -36,14 +43,9 @@ namespace Capture3DS.Cypress
         private bool _hasEeprom;
 
         // cc3dsfs capture_start(is_first_load=true). is_rgb888 selects the FPGA
-        // bitstream; the existing decoder consumes the packed RGB8 (888) layout.
+        // bitstream (RGB888 or RGB565).
         private void RunOptimizeCaptureStart(bool isRgb888, bool is3d, string key)
         {
-            if (!isRgb888)
-            {
-                throw new Capture3DSException("LL-SPA3 capture_start currently supports only the RGB8 (888) FPGA bitstream.");
-            }
-
             // Stop any prior capture session so the FX2 returns to idle before we
             // start. cc3dsfs always pairs capture_start with a preceding capture_end;
             // without it a previously started session (e.g. one that crashed, or a
@@ -77,8 +79,8 @@ namespace Capture3DS.Cypress
 
             DeviceIdMatchesKey = ComputeDeviceIdMatchesKey(key, deviceId);
 
-            FpgaPlLoad(LoadEmbeddedFpga888());
-            InsertDeviceId(deviceId);
+            FpgaPlLoad(LoadEmbeddedFpga(isRgb888));
+            InsertDeviceId(deviceId, isRgb888);
 
             // final_capture_start_transfer.
             SendBulkOut(new byte[] { 0x5B, 0x59, 0x03 });
@@ -261,7 +263,7 @@ namespace Capture3DS.Cypress
             SendBulkOut(new byte[] { 0x60, 0x01, 0x01, 0xFF });
         }
 
-        private void InsertDeviceId(ulong deviceId)
+        private void InsertDeviceId(ulong deviceId, bool isRgb888)
         {
             SendBulkOut(new byte[]
             {
@@ -271,12 +273,20 @@ namespace Capture3DS.Cypress
             });
 
             // device_id_buffer_old_3ds (is_new_device=false). The bytes at [9..12]
-            // differ from the New 3DS buffer.
+            // identify the loaded FPGA design: 0x00010B2A for RGB888, 0x000057E6
+            // for RGB565.
             var idBuffer = new byte[]
             {
                 0x71, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A,
                 0x0B, 0x01, 0x00, 0x02, 0x30, 0xFF, 0x60, 0x65
             };
+            if (!isRgb888)
+            {
+                idBuffer[9] = 0xE6;
+                idBuffer[10] = 0x57;
+                idBuffer[11] = 0x00;
+            }
+
             WriteLe64(idBuffer, 1, deviceId);
             SendBulkOut(idBuffer);
         }
@@ -292,27 +302,38 @@ namespace Capture3DS.Cypress
             }
         }
 
-        private static byte[] LoadEmbeddedFpga888()
+        private static byte[] LoadEmbeddedFpga(bool isRgb888)
         {
-            if (_fpga888Cache != null)
+            var cached = isRgb888 ? _fpga888Cache : _fpga565Cache;
+            if (cached != null)
             {
-                return _fpga888Cache;
+                return cached;
             }
 
+            var resourceName = isRgb888 ? Fpga888ResourceName : Fpga565ResourceName;
             var assembly = typeof(LlSpa3Device).Assembly;
-            using (var stream = assembly.GetManifestResourceStream(Fpga888ResourceName))
+            using (var stream = assembly.GetManifestResourceStream(resourceName))
             {
                 if (stream == null)
                 {
                     throw new InvalidOperationException(
-                        $"Embedded FPGA bitstream '{Fpga888ResourceName}' was not found in the assembly.");
+                        $"Embedded FPGA bitstream '{resourceName}' was not found in the assembly.");
                 }
 
                 using (var ms = new MemoryStream())
                 {
                     stream.CopyTo(ms);
-                    _fpga888Cache = ms.ToArray();
-                    return _fpga888Cache;
+                    var data = ms.ToArray();
+                    if (isRgb888)
+                    {
+                        _fpga888Cache = data;
+                    }
+                    else
+                    {
+                        _fpga565Cache = data;
+                    }
+
+                    return data;
                 }
             }
         }
@@ -386,7 +407,7 @@ namespace Capture3DS.Cypress
             TeardownOptimizePipeline();
             _bulkIn.XferSize = VideoSliceSize;
             _sliceEndpoint = new CyUsbSliceEndpoint(_bulkIn, PipelineDepth, VideoSliceSize);
-            _reader = new LlSpa3StreamReader(_sliceEndpoint, TimeoutMs);
+            _reader = new LlSpa3StreamReader(_sliceEndpoint, TimeoutMs, _layout);
             _reader.Start();
         }
 

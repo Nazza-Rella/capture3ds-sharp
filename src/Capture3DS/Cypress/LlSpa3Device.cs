@@ -142,13 +142,16 @@ namespace Capture3DS.Cypress
             StartOptimizeNewCompatibleStream();
         }
 
-        // cc3dsfs Optimize New 3DS capture start. Always RGB8 / 2D; the FPGA and
-        // capture pipeline are programmed from scratch (required after our own
-        // firmware self-load to 1004, where the FPGA is not yet programmed).
+        // cc3dsfs Optimize New 3DS capture start, 2D in the colour depth of
+        // ColorMode; the FPGA and capture pipeline are programmed from scratch
+        // (required after our own firmware self-load to 1004, where the FPGA is
+        // not yet programmed).
         private void StartOptimizeNewCompatibleStream()
         {
-            const bool isRgb888 = true;
+            var isRgb888 = ColorMode == LlSpa3ColorMode.Rgb888;
             const bool is3d = false;
+            _layout = isRgb888 ? LlSpa3FrameLayout.Rgb888 : LlSpa3FrameLayout.Rgb565;
+            _audioDecoder.Layout = _layout;
 
             EnsureConnected();
             if (_bulkOut == null || _ctrlBulkIn == null)
@@ -168,11 +171,9 @@ namespace Capture3DS.Cypress
 
             RunOptimizeCaptureStart(isRgb888, is3d, key);
 
-            // Arm the bulk-in read pipeline BEFORE triggering capture DMA.
-            // cc3dsfs schedules NUM_CONCURRENTLY_RUNNING_BUFFERS reads
-            // (TOTAL_WANTED 0x100000 / SLICE 0x4000 = 64) ahead of StartCaptureDma;
-            // the FX2 stalls frame generation when no reads are armed, which on a
-            // single synchronous read shows up as a zero-data timeout on EP 0x82.
+            // Arm the bulk-in read pipeline BEFORE triggering capture DMA. The FX2
+            // stalls frame generation when no reads are armed, which on a single
+            // synchronous read shows up as a zero-data timeout on EP 0x82.
             ArmOptimizePipeline();
 
             // Public cc3dsfs Optimize New StartCaptureDma sequence. The product
@@ -225,7 +226,7 @@ namespace Capture3DS.Cypress
             var raw = _reader.Take(TimeoutMs);
             try
             {
-                return LlSpa3Decoder.Decode(raw, raw.Length, _audioDecoder);
+                return LlSpa3Decoder.Decode(raw, raw.Length, _audioDecoder, _layout);
             }
             finally
             {

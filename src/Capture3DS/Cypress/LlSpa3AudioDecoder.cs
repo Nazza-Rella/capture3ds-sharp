@@ -9,6 +9,9 @@ namespace Capture3DS.Cypress
     {
         private int _lastSampleIndex = -1;
 
+        // Column stride and frame sizes of the colour mode being streamed.
+        internal LlSpa3FrameLayout Layout { get; set; } = LlSpa3FrameLayout.Rgb888;
+
         internal void Reset() { _lastSampleIndex = -1; }
 
         internal Capture3DSAudioChunk Decode(byte[] raw, int length)
@@ -16,7 +19,7 @@ namespace Capture3DS.Cypress
             if (raw == null || length < 4 || length > raw.Length) return null;
             bool extraHeader = LlSpa3Decoder.HasExtraHeaderColumn(raw, 0);
             int columns = extraHeader ? 401 : 400;
-            int required = extraHeader ? LlSpa3Decoder.ExtraHeaderFrameSize : LlSpa3Decoder.FrameSize;
+            int required = extraHeader ? Layout.ExtraHeaderFrameSize : Layout.FrameSize;
             if (length < required) return null;
 
             // Validate all headers before updating the cross-frame index. A
@@ -24,7 +27,7 @@ namespace Capture3DS.Cypress
             // next packet's duplicate suppression.
             for (int column = 0; column < columns; column++)
             {
-                int offset = column * LlSpa3Decoder.ColumnStride;
+                int offset = column * Layout.ColumnStride;
                 if (Word(raw, offset) != 0xCC33 || (Word(raw, offset + 2) & 0x3FF) != column)
                     return null;
             }
@@ -34,7 +37,7 @@ namespace Capture3DS.Cypress
             var samples = new short[columns * 4];
             for (int column = 0; column < columns; column++)
             {
-                int offset = column * LlSpa3Decoder.ColumnStride + 4;
+                int offset = column * Layout.ColumnStride + 4;
                 for (int sample = 0; sample < 2; sample++, offset += 6)
                 {
                     int index = Word(raw, offset) & 0x1FF;

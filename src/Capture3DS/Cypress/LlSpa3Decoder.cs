@@ -1,8 +1,9 @@
 namespace Capture3DS.Cypress
 {
-    // Decoder for the cc3dsfs "Optimize Old 3DS" RGB888 2D frame format.
+    // Decoder for the cc3dsfs "Optimize Old 3DS" 2D frame formats (RGB888 and
+    // RGB565; LlSpa3FrameLayout holds the per-mode sizes).
     //
-    // Frame layout (capture_structs.hpp / conversions.cpp, verified):
+    // RGB888 frame layout (capture_structs.hpp / conversions.cpp, verified):
     //   columns_data[400], each column = 16B header + pixel[240][2]*3B = 1456B
     //   bottom_only_column = pixel[240][2]*3B = 1440B (no header)
     //   total = 400*1456 + 1440 = 583840 bytes
@@ -28,6 +29,10 @@ namespace Capture3DS.Cypress
     //   BOT  col 319         <- columns_data[78] plane0
     //   columns_data[400] is not part of the picture and is discarded.
     //
+    // RGB565 uses the same column mapping. Each column holds 240 heights of
+    // { bottom u16, top u16 } (976-byte stride); a pixel is little-endian
+    // 5-6-5 with red in the top bits.
+    //
     // cc3dsfs stores screen_data column-major with base_rotation=90; the upright
     // image is buffer[col*240 + (239-h)], so output row = 239 - h.
     internal static class LlSpa3Decoder
@@ -37,7 +42,7 @@ namespace Capture3DS.Cypress
         public const int BottomWidth = 320;
 
         public const int ColumnStride = 1456;
-        private const int ColumnHeaderSize = 16;
+        public const int ColumnHeaderSize = 16;
         public const int NumColumns = 400;
         private const int BottomOnlyOffset = NumColumns * ColumnStride; // 582400
         public const int FrameSize = BottomOnlyOffset + Height * 2 * 3; // 583840
@@ -66,13 +71,18 @@ namespace Capture3DS.Cypress
 
         internal static Capture3DSFrame Decode(byte[] raw, int length, LlSpa3AudioDecoder audioDecoder)
         {
+            return Decode(raw, length, audioDecoder, LlSpa3FrameLayout.Rgb888);
+        }
+
+        internal static Capture3DSFrame Decode(byte[] raw, int length, LlSpa3AudioDecoder audioDecoder, LlSpa3FrameLayout layout)
+        {
             if (raw == null || length <= 0)
             {
                 throw new Capture3DSException("LL-SPA3 returned no capture data.");
             }
 
             var hasExtraHeader = length >= 4 && HasExtraHeaderColumn(raw, 0);
-            var neededLength = hasExtraHeader ? BottomOnlyOffset : FrameSize;
+            var neededLength = hasExtraHeader ? layout.BottomOnlyOffset : layout.FrameSize;
             if (length < neededLength)
             {
                 throw new Capture3DSException(
@@ -84,7 +94,7 @@ namespace Capture3DS.Cypress
 
             for (int j = 0; j < NumColumns; j++)
             {
-                FillColumn(raw, (j * ColumnStride) + ColumnHeaderSize, PlaneTop, top, TopWidth, j);
+                FillColumn(raw, (j * layout.ColumnStride) + ColumnHeaderSize, PlaneTop, top, TopWidth, j, layout.IsRgb888);
             }
 
             var startBotPos = hasExtraHeader ? ColumnStartBotPos - 1 : ColumnStartBotPos;
@@ -93,24 +103,43 @@ namespace Capture3DS.Cypress
 
             for (int column = startBotPos; column < NumColumns; column++)
             {
-                FillColumn(raw, (column * ColumnStride) + ColumnHeaderSize, PlaneBottom,
-                    bottom, BottomWidth, column - startBotPos);
+                FillColumn(raw, (column * layout.ColumnStride) + ColumnHeaderSize, PlaneBottom,
+                    bottom, BottomWidth, column - startBotPos, layout.IsRgb888);
             }
-            FillColumn(raw, (preLastBotPos * ColumnStride) + ColumnHeaderSize, PlaneBottom,
-                bottom, BottomWidth, targetPreLast);
+            FillColumn(raw, (preLastBotPos * layout.ColumnStride) + ColumnHeaderSize, PlaneBottom,
+                bottom, BottomWidth, targetPreLast, layout.IsRgb888);
             if (!hasExtraHeader)
             {
-                FillColumn(raw, BottomOnlyOffset, PlaneBottom, bottom, BottomWidth, BottomWidth - 1);
+                FillColumn(raw, layout.BottomOnlyOffset, PlaneBottom, bottom, BottomWidth, BottomWidth - 1, layout.IsRgb888);
             }
 
             var audio = audioDecoder != null ? audioDecoder.Decode(raw, length) : null;
             return new Capture3DSFrame(top, TopWidth, Height, bottom, BottomWidth, Height, audio);
         }
 
-        // Deinterleaves one plane of one source column (60 groups x 24B) into the
-        // destination output column, mapping height h to output row (239 - h).
-        private static void FillColumn(byte[] raw, int pixelBase, int plane, byte[] dst, int dstWidth, int outCol)
+        // Deinterleaves one plane of one source column into the destination output
+        // column, mapping height h to output row (239 - h).
+        private static void FillColumn(byte[] raw, int pixelBase, int plane, byte[] dst, int dstWidth, int outCol, bool isRgb888)
         {
+            if (!isRgb888)
+            {
+                for (int h = 0; h < Height; h++)
+                {
+                    int src = pixelBase + (h * 4) + (plane * 2);
+                    int value = raw[src] | (raw[src + 1] << 8);
+                    int r = (value >> 11) & 0x1F;
+                    int g = (value >> 5) & 0x3F;
+                    int b = value & 0x1F;
+                    int dstPix = ((((Height - 1) - h) * dstWidth) + outCol) * 3;
+                    dst[dstPix] = (byte)((r << 3) | (r >> 2));
+                    dst[dstPix + 1] = (byte)((g << 2) | (g >> 4));
+                    dst[dstPix + 2] = (byte)((b << 3) | (b >> 2));
+                }
+
+                return;
+            }
+
+            // RGB888: 60 groups of 24 bytes, each holding 4 heights.
             for (int i = 0; i < 60; i++)
             {
                 int groupBase = pixelBase + (i * 24);
