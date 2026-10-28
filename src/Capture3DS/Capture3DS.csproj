@@ -20,6 +20,7 @@
       <HintPath>..\..\external\CyUSB\library\c_sharp\lib\CyUSB.dll</HintPath>
       <Private>true</Private>
     </Reference>
+    <Reference Include="System.Windows.Forms" />
   </ItemGroup>
 
   <!-- キャプボ用ファームウェアをアセンブリへ埋め込む(cc3dsfs bin/, MIT) -->
