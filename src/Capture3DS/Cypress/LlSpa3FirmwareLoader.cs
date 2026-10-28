@@ -35,8 +35,9 @@ namespace Capture3DS.Cypress
         {
             var firmware = LoadEmbeddedFirmware();
 
-            using (var list = new USBDeviceList(CyConst.DEVICES_CYUSB))
+            using (var listHost = new CyUsbDeviceListHost())
             {
+                var list = listHost.Devices;
                 foreach (USBDevice usb in list)
                 {
                     var dev = usb as CyUSBDevice;

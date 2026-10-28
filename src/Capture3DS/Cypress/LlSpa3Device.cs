@@ -20,7 +20,7 @@ namespace Capture3DS.Cypress
         private const int TimeoutMs = 1000;
         private const int FirmwareRenumerateTimeoutMs = 4000;
 
-        private USBDeviceList _deviceList;
+        private CyUsbDeviceListHost _deviceListHost;
         private CyUSBDevice _device;
         private CyBulkEndPoint _bulkIn;
         private CyBulkEndPoint _ctrlBulkIn;
@@ -38,8 +38,9 @@ namespace Capture3DS.Cypress
         public static IReadOnlyList<Capture3DSDeviceInfo> ListDevices()
         {
             var devices = new List<Capture3DSDeviceInfo>();
-            using (var list = new USBDeviceList(CyConst.DEVICES_CYUSB))
+            using (var listHost = new CyUsbDeviceListHost())
             {
+                var list = listHost.Devices;
                 var index = 0;
                 foreach (USBDevice usb in list)
                 {
@@ -96,18 +97,18 @@ namespace Capture3DS.Cypress
         {
             DisposeHandle();
 
-            _deviceList = new USBDeviceList(CyConst.DEVICES_CYUSB);
-            _device = FindStreamingDevice(_deviceList, Info.Serial);
-            if (_device == null && ContainsBootDevice(_deviceList))
+            _deviceListHost = new CyUsbDeviceListHost();
+            _device = FindStreamingDevice(_deviceListHost.Devices, Info.Serial);
+            if (_device == null && ContainsBootDevice(_deviceListHost.Devices))
             {
                 // Self-load the cc3dsfs MIT firmware so the board renumerates from
                 // boot mode (04B4:8613) to the streamed device (04B4:1004).
-                _deviceList.Dispose();
-                _deviceList = null;
+                _deviceListHost.Dispose();
+                _deviceListHost = null;
                 LlSpa3FirmwareLoader.LoadFirmwareToBootDevice();
                 WaitForStreamingDevice(FirmwareRenumerateTimeoutMs);
-                _deviceList = new USBDeviceList(CyConst.DEVICES_CYUSB);
-                _device = FindStreamingDevice(_deviceList, Info.Serial);
+                _deviceListHost = new CyUsbDeviceListHost();
+                _device = FindStreamingDevice(_deviceListHost.Devices, Info.Serial);
             }
 
             if (_device == null)
@@ -263,10 +264,10 @@ namespace Capture3DS.Cypress
             _streamStarted = false;
             _device = null;
 
-            if (_deviceList != null)
+            if (_deviceListHost != null)
             {
-                _deviceList.Dispose();
-                _deviceList = null;
+                _deviceListHost.Dispose();
+                _deviceListHost = null;
             }
         }
 
@@ -314,8 +315,9 @@ namespace Capture3DS.Cypress
             var deadline = Environment.TickCount + timeoutMs;
             while (Environment.TickCount < deadline)
             {
-                using (var list = new USBDeviceList(CyConst.DEVICES_CYUSB))
+                using (var listHost = new CyUsbDeviceListHost())
                 {
+                    var list = listHost.Devices;
                     foreach (USBDevice usb in list)
                     {
                         var dev = usb as CyUSBDevice;
