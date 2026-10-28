@@ -59,6 +59,15 @@ namespace Capture3DS
             return LlSpa3OptimizeProtocol.TrySaveProductKeyToJson(key);
         }
 
+        /// <summary>
+        /// LL-SPA3のプロダクトキーを消去する。明示的な空設定を保存し、
+        /// n3DS_viewのEEPROMキャッシュから自動復元されないようにする。
+        /// </summary>
+        public static bool ClearLlSpa3ProductKey()
+        {
+            return LlSpa3OptimizeProtocol.TryClearProductKeyFromJson();
+        }
+
         private static IReadOnlyList<Capture3DSDeviceInfo> SafeList(Func<IReadOnlyList<Capture3DSDeviceInfo>> lister)
         {
             try { return lister(); }

@@ -80,6 +80,7 @@ namespace Capture3DS
 
         /// <summary>
         /// 上画面を上、下画面を中央寄せで下に積んだ RGB8 モザイクを返す。
+        /// 拡大・縮小や補間は行わず、各画面をドットバイドットで配置する。
         /// 幅 = max(上幅, 下幅)、高さ = 上高 + 下高。余白は黒。
         /// </summary>
         public byte[] ToMosaic(out int width, out int height)
@@ -107,8 +108,94 @@ namespace Capture3DS
         }
 
         /// <summary>
-        /// 1280x720 固定の RGB8 キャンバスへ、モザイクをアスペクト維持・中央配置(レターボックス)で
-        /// 焼き込んで返す。NX 等の 720p パイプラインへそのまま渡せる。
+        /// Copies the native-size, vertically stacked screens into caller-owned
+        /// unmanaged BGR24 memory without allocating an intermediate mosaic.
+        /// Width is max(TopWidth, BottomWidth); height is TopHeight + BottomHeight.
+        /// Each screen is horizontally centered and its side margins are black.
+        /// No resizing or interpolation is performed.
+        /// </summary>
+        /// <param name="destination">Address of the first (top) output row.</param>
+        /// <param name="stride">Positive byte distance between output rows;
+        /// must be at least the output width multiplied by three.</param>
+        /// <param name="bufferLength">Writable bytes available from destination;
+        /// must include every image byte through the last row.</param>
+        /// <remarks>
+        /// Row padding after width * 3 bytes is left untouched. The caller must
+        /// own writable memory of the stated size for the entire call, and must
+        /// not overlap it with either source array or mutate those arrays during
+        /// the call. No pointer is retained, and source ownership is unchanged.
+        /// Negative stride is not supported. All dimensions and buffer bounds are
+        /// validated before any output is written; a nonzero pointer alone cannot
+        /// prove that the caller actually owns the stated unmanaged memory.
+        /// Screen dimensions may be zero, but the combined canvas must be nonempty.
+        /// </remarks>
+        /// <exception cref="ArgumentNullException">destination is zero.</exception>
+        /// <exception cref="ArgumentOutOfRangeException">stride is not positive,
+        /// or bufferLength is negative.</exception>
+        /// <exception cref="ArgumentException">The stride or destination buffer
+        /// is too small for the complete image.</exception>
+        /// <exception cref="InvalidOperationException">The frame dimensions or
+        /// source arrays do not describe a complete RGB8 frame.</exception>
+        public unsafe void CopyMosaicBgr24To(IntPtr destination, int stride, int bufferLength)
+        {
+            if (destination == IntPtr.Zero)
+                throw new ArgumentNullException(nameof(destination));
+            if (stride <= 0)
+                throw new ArgumentOutOfRangeException(nameof(stride), "A positive stride is required.");
+            if (bufferLength < 0)
+                throw new ArgumentOutOfRangeException(nameof(bufferLength));
+
+            long width = Math.Max(TopWidth, BottomWidth);
+            long height = (long)TopHeight + BottomHeight;
+            if (TopWidth < 0 || TopHeight < 0 || BottomWidth < 0 || BottomHeight < 0
+                || width <= 0 || height <= 0 || width > int.MaxValue / 3 || height > int.MaxValue)
+                throw new InvalidOperationException("The frame has invalid mosaic dimensions.");
+
+            // Bounds above keep these products in Int64 even for malformed input.
+            long topBytes = (long)TopWidth * TopHeight * 3;
+            long bottomBytes = (long)BottomWidth * BottomHeight * 3;
+            if (Top == null || Bottom == null || Top.LongLength < topBytes || Bottom.LongLength < bottomBytes)
+                throw new InvalidOperationException("The frame has incomplete RGB8 source buffers.");
+
+            long rowBytes = width * 3;
+            if (stride < rowBytes)
+                throw new ArgumentException("Stride is smaller than the image row.", nameof(stride));
+            long requiredBytes = (height - 1) * stride + rowBytes;
+            if (bufferLength < requiredBytes)
+                throw new ArgumentException("The destination buffer is too small for the image.", nameof(bufferLength));
+
+            byte* output = (byte*)destination.ToPointer();
+            CopyScreenBgr24(Top, TopWidth, TopHeight, output, stride, (int)width, 0);
+            CopyScreenBgr24(Bottom, BottomWidth, BottomHeight, output, stride, (int)width, TopHeight);
+        }
+
+        private static unsafe void CopyScreenBgr24(byte[] source, int screenWidth, int screenHeight,
+                                                  byte* destination, int stride, int canvasWidth, int firstRow)
+        {
+            int leftBytes = ((canvasWidth - screenWidth) / 2) * 3;
+            int screenBytes = screenWidth * 3;
+            int rowBytes = canvasWidth * 3;
+            fixed (byte* sourceBase = source)
+            {
+                for (int y = 0; y < screenHeight; y++)
+                {
+                    byte* output = destination + (long)(firstRow + y) * stride;
+                    for (int offset = 0; offset < leftBytes; offset++) output[offset] = 0;
+                    byte* input = sourceBase + (long)y * screenBytes;
+                    for (int offset = 0; offset < screenBytes; offset += 3)
+                    {
+                        output[leftBytes + offset] = input[offset + 2];
+                        output[leftBytes + offset + 1] = input[offset + 1];
+                        output[leftBytes + offset + 2] = input[offset];
+                    }
+                    for (int offset = leftBytes + screenBytes; offset < rowBytes; offset++) output[offset] = 0;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 1280x720 固定の RGB8 キャンバスへ、モザイクを拡大しながらアスペクト維持・中央配置
+        /// (レターボックス)で焼き込んで返す。720p 固定の既存パイプラインとの互換用。
         /// </summary>
         public byte[] ToLetterbox720() => ToLetterbox(1280, 720);
 

@@ -7,8 +7,8 @@ using Capture3DS;
 namespace CaptureProbe
 {
     /// <summary>
-    /// 動作確認用コンソール。接続中の 3DS キャプボを列挙し、最初の N3DSXL から
-    /// 1 フレーム取り込んで PNG(上画面/下画面/1280x720レターボックス)を保存する。
+    /// 動作確認用コンソール。対応キャプチャーボードを列挙し、最初の1台から
+    /// フレームを取り込んでPNG（上画面/下画面/ドットバイドット縦結合/互換用1280x720）を保存する。
     /// 使い方: CaptureProbe.exe [出力フォルダ] [フレーム数]
     /// </summary>
     internal static class Program
@@ -27,7 +27,7 @@ namespace CaptureProbe
             }
 
             // 診断モード: 縦ずれ切り分け。接続後、デコードせず連続読みして各転送長を出力する。
-            // 正常フレームは ≒553472 で短パケット終端され、毎回 555008 なら整列崩れ(連結読み)。
+            // 正常フレームは 520568～522492 で短パケット終端され、毎回 851968 なら整列崩れ(連結読み)。
             if (args.Length > 0 && args[0] == "--ftd3sizes")
             {
                 int count = args.Length > 1 && int.TryParse(args[1], out int c) ? c : 120;
@@ -103,8 +103,8 @@ namespace CaptureProbe
                 return 0;
             }
 
-            // 検証モード: 実運用と同じ ReadFrame(再同期付き)を NX 相当の密ループで回し、
-            // 1280x720 へ焼く処理込みで負荷をかける。整列フレームしか返らないはずなので、
+            // 検証モード: 実運用と同じ ReadFrame(再同期付き)を密ループで回し、
+            // 互換用1280x720変換込みで負荷をかける。整列フレームしか返らないはずなので、
             // 一定間隔で保存した PNG が縦ずれしていないことを目視確認する。
             // 使い方: --ftd3verify <出力dir> <フレーム数>
             if (args.Length > 0 && args[0] == "--ftd3verify")
@@ -125,7 +125,7 @@ namespace CaptureProbe
                         {
                             Capture3DSFrame fr = dev.ReadFrame();
                             got++;
-                            byte[] canvas = fr.ToLetterbox720(); // NX と同じ焼き込み負荷
+                            byte[] canvas = fr.ToLetterbox720(); // 互換用720p変換の負荷
                             if (n % 30 == 0 && saved < 20)
                             {
                                 SaveRgb(Path.Combine(vdir, $"verify_{n:D4}.png"), canvas, 1280, 720);
@@ -542,9 +542,11 @@ namespace CaptureProbe
                     string suffix = frames > 1 ? $"_{n:D3}" : "";
                     SaveRgb(Path.Combine(outDir, $"top{suffix}.png"), frame.Top, frame.TopWidth, frame.TopHeight);
                     SaveRgb(Path.Combine(outDir, $"bottom{suffix}.png"), frame.Bottom, frame.BottomWidth, frame.BottomHeight);
+                    byte[] mosaic = frame.ToMosaic(out int mosaicWidth, out int mosaicHeight);
+                    SaveRgb(Path.Combine(outDir, $"frame_native{suffix}.png"), mosaic, mosaicWidth, mosaicHeight);
                     byte[] canvas = frame.ToLetterbox720();
                     SaveRgb(Path.Combine(outDir, $"frame720{suffix}.png"), canvas, 1280, 720);
-                    Console.WriteLine($"  frame {n}: 保存しました");
+                    Console.WriteLine($"  frame {n}: 実解像度 {mosaicWidth}x{mosaicHeight} で保存しました");
                 }
             }
             Console.WriteLine($"完了 -> {Path.GetFullPath(outDir)}");

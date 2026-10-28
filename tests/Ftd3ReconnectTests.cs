@@ -44,11 +44,14 @@ namespace Capture3DS.Ftd3
         internal static int SubmitStatus = FT_IO_PENDING, InitializeFailureAt = -1, ReleaseFailureAt = -1;
         internal static int ThrowOnSubmitAt = -1, SubmitCount, InitializeCount;
         internal static Action<NativeSlot> OnSubmitted;
-        private static readonly byte[] Zeros = new byte[555008];
+        internal static IntPtr? OtherErrorInternal;
+        internal const int CaptureRequestSize = 851968;
+        private static readonly byte[] Zeros = new byte[CaptureRequestSize];
 
         public static readonly List<string> Calls = new List<string>();
         public static readonly List<int> CloseThreads = new List<int>();
         public static readonly HashSet<IntPtr> Handles = new HashSet<IntPtr>();
+        public static readonly List<string> CreatedSerials = new List<string>();
         private static readonly Dictionary<IntPtr, uint> Timeouts = new Dictionary<IntPtr, uint>();
         public static Action<string> OnCall;
         public static int FrameStatus, StreamStatus, TimeoutStatus, CloseStatus, CreateStatus;
@@ -62,14 +65,14 @@ namespace Capture3DS.Ftd3
         public static void Reset()
         {
             if (Slots.Values.Any(slot => !slot.Released)) throw new Exception("Previous fixture leaked an initialized overlap.");
-            Calls.Clear(); CloseThreads.Clear(); Handles.Clear(); Timeouts.Clear(); OnCall = null;
+            Calls.Clear(); CloseThreads.Clear(); Handles.Clear(); CreatedSerials.Clear(); Timeouts.Clear(); OnCall = null;
             FrameStatus = StreamStatus = TimeoutStatus = CloseStatus = CreateStatus = 0;
             FrameLength = 520592; Streaming = FailStreamTimeout = false; ReadsWithoutTimeout = 0; nextHandle = 0;
             FramePayload = null;
             FrameResponses.Clear();
             Slots.Clear(); SlotHistory.Clear(); SubmitStatuses.Clear(); CompletionStatuses.Clear();
             SubmitStatus = FT_IO_PENDING; InitializeFailureAt = ReleaseFailureAt = ThrowOnSubmitAt = -1;
-            SubmitCount = InitializeCount = 0; OnSubmitted = null;
+            SubmitCount = InitializeCount = 0; OnSubmitted = null; OtherErrorInternal = null;
             SubmissionOrder.Clear(); CompletionOrder.Clear();
         }
         private static void Call(string name)
@@ -84,6 +87,7 @@ namespace Capture3DS.Ftd3
         { throw new InvalidOperationException("Enumeration is outside these tests."); }
         public static int FT_Create(byte[] serial, uint flags, out IntPtr handle)
         {
+            CreatedSerials.Add(System.Text.Encoding.ASCII.GetString(serial).TrimEnd('\0'));
             handle = CreateStatus == 0 ? new IntPtr(++nextHandle) : IntPtr.Zero;
             if (handle != IntPtr.Zero) { Handles.Add(handle); Timeouts[handle] = 0; }
             Streaming = false;
@@ -101,7 +105,10 @@ namespace Capture3DS.Ftd3
         public static int FT_AbortPipe(IntPtr handle, byte pipe)
         { Call("Abort"); return 0; }
         public static int FT_SetStreamPipe(IntPtr handle, bool allWrite, bool allRead, byte pipe, uint length)
-        { Timeouts[handle] = 0; Streaming = true; Call("Stream"); return StreamStatus; }
+        {
+            if (length != CaptureRequestSize) throw new Exception("Stream capacity must match official 3ds_capture 6.1.");
+            Timeouts[handle] = 0; Streaming = true; Call("Stream"); return StreamStatus;
+        }
         public static int FT_SetPipeTimeout(IntPtr handle, byte pipe, uint timeout)
         {
             int status = FailStreamTimeout && Streaming ? 4 : TimeoutStatus;
@@ -116,18 +123,19 @@ namespace Capture3DS.Ftd3
             out uint transferred, IntPtr overlapped)
         {
             if (Timeouts[handle] == 0) ReadsWithoutTimeout++;
-            transferred = length == 555008 ? FrameLength : length;
+            if (buffer.Length < length) throw new Exception("Synchronous read exceeds its managed buffer.");
+            transferred = length == CaptureRequestSize ? FrameLength : length;
             byte[] payload = FramePayload;
-            if (length == 555008 && FrameResponses.Count != 0)
+            if (length == CaptureRequestSize && FrameResponses.Count != 0)
             {
                 var response = FrameResponses.Dequeue();
                 transferred = response.Item1;
                 payload = response.Item2;
             }
-            Call(length == 555008 ? "FrameRead" : length == 16 ? "CommandRead" : "DrainRead");
-            if (length == 555008 && payload != null)
+            Call(length == CaptureRequestSize ? "FrameRead" : length == 16 ? "CommandRead" : "DrainRead");
+            if (length == CaptureRequestSize && payload != null)
                 Array.Copy(payload, buffer, Math.Min(payload.Length, buffer.Length));
-            return length == 555008 ? FrameStatus : 0;
+            return length == CaptureRequestSize ? FrameStatus : 0;
         }
 
         public static int FT_InitializeOverlapped(IntPtr handle, IntPtr overlapped)
@@ -141,8 +149,18 @@ namespace Capture3DS.Ftd3
                 || initial.Offset != 0 || initial.OffsetHigh != 0 || initial.Event != IntPtr.Zero)
                 throw new Exception("OVERLAPPED was not initialized to zero.");
             Marshal.StructureToPtr(new Overlapped { Event = slot.Event.SafeWaitHandle.DangerousGetHandle() }, overlapped, false);
-            Slots.Add(overlapped, slot); SlotHistory.Add(slot);
+            // A later connection may legitimately reuse a freed native address.
+            if (Slots.ContainsKey(overlapped) && !Slots[overlapped].Released)
+                throw new Exception("Initialized overlap replaced a still-owned slot.");
+            Slots[overlapped] = slot; SlotHistory.Add(slot);
             Call("Initialize"); return 0;
+        }
+
+        private static void SetInternal(NativeSlot slot, IntPtr status)
+        {
+            var native = (Overlapped)Marshal.PtrToStructure(slot.Overlapped, typeof(Overlapped));
+            native.Internal = status;
+            Marshal.StructureToPtr(native, slot.Overlapped, false);
         }
 
         private static uint Fill(NativeSlot slot)
@@ -172,7 +190,8 @@ namespace Capture3DS.Ftd3
             slot.Pending = true;
             if (SubmitCount == ThrowOnSubmitAt) { Call("SubmitThrows"); throw new InvalidOperationException("fake native invoke failed"); }
             int status = SubmitStatuses.Count == 0 ? SubmitStatus : SubmitStatuses.Dequeue();
-            if (status == 0) { Fill(slot); slot.Pending = false; }
+            if (status == 0) { Fill(slot); slot.Pending = false; SetInternal(slot, IntPtr.Zero); }
+            else if (status == FT_IO_PENDING) SetInternal(slot, new IntPtr(0x103));
             else if (status != FT_IO_PENDING) slot.Pending = false;
             OnSubmitted?.Invoke(slot);
             Call("Submit"); return status;
@@ -189,6 +208,14 @@ namespace Capture3DS.Ftd3
             if (status == 0 || status == 19 || status == 20 || status == 30)
             {
                 transferred = Fill(slot); slot.Pending = false;
+                SetInternal(slot, IntPtr.Zero);
+            }
+            else if (status == 32 && OtherErrorInternal.HasValue)
+            {
+                // Device removal can finish the accepted kernel operation while
+                // D3XX reports only FT_OTHER_ERROR. No frame bytes are produced.
+                SetInternal(slot, OtherErrorInternal.Value);
+                slot.Pending = false;
             }
             Call("Complete"); return status;
         }
@@ -465,6 +492,68 @@ internal static class Ftd3ReconnectTests
         finally { Ftd3Native.FrameStatus = 0; Ftd3Native.CloseStatus = 0; device.Dispose(); }
     }
 
+    private static void UnpluggedAcceptedReadsPermitReconnect()
+    {
+        // Both zero and an error NTSTATUS are terminal once FT_IO_PENDING has
+        // confirmed acceptance. The existing unknown-completion test keeps
+        // STATUS_PENDING and must continue retaining its native ownership.
+        foreach (IntPtr terminalStatus in new[] { IntPtr.Zero, new IntPtr(unchecked((int)0xC000009D)) })
+        {
+            var device = Connected();
+            try
+            {
+                Check(device.ReadFrame() != null, "unplug test starts with a healthy capture frame");
+                IntPtr oldHandle = Ftd3Native.Handles.Single();
+                var oldSlots = Ftd3Native.SlotHistory.ToArray();
+                Check(oldSlots.Length == 12 && oldSlots.All(slot => slot.Pending && !slot.Released
+                    && Marshal.ReadIntPtr(slot.Overlapped) == new IntPtr(0x103)),
+                    "all accepted reads expose STATUS_PENDING before unplug");
+                int submissions = Count("Submit");
+                Ftd3Native.FrameStatus = 32;
+                Ftd3Native.OtherErrorInternal = terminalStatus;
+                Throws<Capture3DSException>(() => device.ReadFrame(),
+                    "terminal FT_OTHER_ERROR still reports a read failure, never a successful frame");
+                Check(Count("Submit") == submissions && Count("Abort") == 0,
+                    "unplug error neither rearms a frame nor aborts the pipe");
+                Check(oldSlots.Count(slot => !slot.Pending) == 1 && oldSlots.All(slot => !slot.Released),
+                    "failed read confirms only its own terminal operation before disposal");
+                device.Dispose();
+                Check(oldSlots.All(slot => slot.Released && !slot.Pending) && Count("Release") == 12,
+                    "device removal drains and releases every accepted terminal overlap exactly once");
+                Check(Ftd3Native.Handles.Count == 0 && Count("Close") == 1 && Count("Abort") == 0,
+                    "successful terminal cleanup closes the original handle without an abort");
+                Check(Ftd3Native.Calls.Last() == "Close", "original handle closes after overlap release");
+
+                Ftd3Native.FrameStatus = 0;
+                Ftd3Native.OtherErrorInternal = null;
+                using (var replacement = Device())
+                {
+                    replacement.Connect();
+                    IntPtr newHandle = Ftd3Native.Handles.Single();
+                    Check(newHandle != oldHandle, "same serial reconnect obtains a fresh native handle");
+                    Check(Ftd3Native.CreatedSerials.Count == 4 && Ftd3Native.CreatedSerials.All(serial => serial == "fake"),
+                        "initial and replacement drain/capture opens use exactly the same device serial");
+                    device.Dispose();
+                    Check(Ftd3Native.Handles.SetEquals(new[] { newHandle }),
+                        "late original Dispose cannot close the replacement handle");
+                    Check(replacement.ReadFrame() != null, "capture resumes on the replacement handle after unplug cleanup");
+                    Check(Ftd3Native.SlotHistory.Count == 24 && Ftd3Native.SlotHistory.Skip(12)
+                        .All(slot => slot.Handle == newHandle && slot.Pending && !slot.Released),
+                        "replacement owns a fresh twelve-slot pending ring");
+                    Check(Ftd3Native.ReadsWithoutTimeout == 0, "reconnection preserves finite USB read timeouts");
+                }
+                Check(Ftd3Native.Handles.Count == 0 && Ftd3Native.SlotHistory.All(slot => slot.Released && !slot.Pending)
+                    && Count("Release") == 24, "both sessions release every owned overlap without double release");
+            }
+            finally
+            {
+                Ftd3Native.FrameStatus = 0;
+                Ftd3Native.OtherErrorInternal = null;
+                device.Dispose();
+            }
+        }
+    }
+
     private static byte[] AudioPacket(int pairs, short marker)
     {
         var raw = new byte[518400 + pairs * 4];
@@ -512,8 +601,12 @@ internal static class Ftd3ReconnectTests
 
     private static void PacketShapeBounds()
     {
+        var sizes = Ftd3N3dsxlDevice.DiagnosticSizes();
+        Check(sizes.videoSize == 518400 && sizes.captureSize == Ftd3Native.CaptureRequestSize
+            && sizes.maxNonError == 553984, "larger USB capacity leaves video and decoder payload limits unchanged");
         uint[] invalid = { 0, 518396, 518399, 518400, 518404, 520564, 520567,
-            520569, 520570, 520571, 522493, 522494, 522496, 553472, 553984, 555008 };
+            520569, 520570, 520571, 522493, 522494, 522496, 553472, 553984, 555008,
+            555009, 851964, Ftd3Native.CaptureRequestSize };
         using (var device = Connected())
         {
             foreach (uint length in invalid)
@@ -528,7 +621,7 @@ internal static class Ftd3ReconnectTests
 
             Ftd3Native.Calls.Clear();
             Ftd3Native.FrameResponses.Enqueue(Tuple.Create(518396u, (byte[])null));
-            Ftd3Native.FrameResponses.Enqueue(Tuple.Create(555008u, (byte[])null));
+            Ftd3Native.FrameResponses.Enqueue(Tuple.Create((uint)Ftd3Native.CaptureRequestSize, (byte[])null));
             Ftd3Native.FrameResponses.Enqueue(Tuple.Create(520570u, (byte[])null));
             byte[] valid = AudioPacket(547, 1234);
             Ftd3Native.FrameResponses.Enqueue(Tuple.Create((uint)valid.Length, valid));
@@ -557,7 +650,7 @@ internal static class Ftd3ReconnectTests
         }
         using (var device = Connected())
         {
-            foreach (uint length in invalid.Concat(new uint[] { 851968, uint.MaxValue }))
+            foreach (uint length in invalid.Concat(new uint[] { uint.MaxValue }))
             {
                 Ftd3Native.Calls.Clear(); Ftd3Native.FrameLength = length;
                 uint actual;
@@ -566,7 +659,7 @@ internal static class Ftd3ReconnectTests
                 Check(Ftd3Native.Calls.SequenceEqual(new[] { "FrameRead" }), "diagnostic remains one read");
             }
         }
-        foreach (uint length in new uint[] { 555009, 851968, uint.MaxValue })
+        foreach (uint length in new uint[] { Ftd3Native.CaptureRequestSize + 1, uint.MaxValue })
         using (var device = Connected())
         {
             Ftd3Native.FrameLength = length;
@@ -599,17 +692,24 @@ internal static class Ftd3ReconnectTests
         using (var device = Connected())
         {
             Ftd3Native.FrameStatus = status;
-            Throws<Capture3DSException>(() =>
+            try
             {
-                if (mode == 0) device.ReadFrame();
-                else if (mode == 1) device.ReadRawTransferSize();
-                else { uint actual; device.ReadFrameDiagnostic(out actual); }
-            }, "OTHER_ERROR/unknown code is not pending: " + status);
-            Check((mode == 0 ? Count("Complete") == 1 && Count("Submit") == 12 : Ftd3Native.Calls.SequenceEqual(new[] { "FrameRead" }))
-                && Count("Abort") == 0 && Count("Stream") == 0, "real error never triggers a false pending Abort/Stream/retry");
-            Check(Ftd3Native.Handles.Count == 1 && Ftd3Native.ReadsWithoutTimeout == 0,
-                "caller retains bounded worker-owned cleanup after error");
-            Ftd3Native.FrameStatus = 0;
+                Throws<Capture3DSException>(() =>
+                {
+                    if (mode == 0) device.ReadFrame();
+                    else if (mode == 1) device.ReadRawTransferSize();
+                    else { uint actual; device.ReadFrameDiagnostic(out actual); }
+                }, "OTHER_ERROR/unknown code is not pending: " + status);
+                // A previously accepted request may poll FT_OTHER_ERROR until
+                // Internal becomes terminal; it must never submit a new read or
+                // perform the legacy pending-status Abort/Stream recovery.
+                bool validQueries = status == 32 ? Count("Complete") >= 1 : Count("Complete") == 1;
+                Check((mode == 0 ? validQueries && Count("Submit") == 12 : Ftd3Native.Calls.SequenceEqual(new[] { "FrameRead" }))
+                    && Count("Abort") == 0 && Count("Stream") == 0, "real error never triggers a false pending Abort/Stream/retry");
+                Check(Ftd3Native.Handles.Count == 1 && Ftd3Native.ReadsWithoutTimeout == 0,
+                    "caller retains bounded worker-owned cleanup after error");
+            }
+            finally { Ftd3Native.FrameStatus = 0; }
         }
     }
 
@@ -625,11 +725,11 @@ internal static class Ftd3ReconnectTests
                 for (int j = 0; j < 518400; j++) packet[j] = (byte)(40 + i);
                 Ftd3Native.FrameResponses.Enqueue(Tuple.Create((uint)packet.Length, packet));
             }
-            byte[] poison = Enumerable.Repeat((byte)0xE7, 555008).ToArray();
+            byte[] poison = Enumerable.Repeat((byte)0xE7, Ftd3Native.CaptureRequestSize).ToArray();
             Ftd3Native.OnSubmitted = slot =>
             {
                 Check(Count("Initialize") == 12, "all twelve overlaps are initialized before the first submission");
-                Check(slot.BufferSize == 555008 && slot.Buffer != IntPtr.Zero && slot.Count != IntPtr.Zero,
+                Check(slot.BufferSize == Ftd3Native.CaptureRequestSize && slot.Buffer != IntPtr.Zero && slot.Count != IntPtr.Zero,
                     "each submission uses stable native-sized buffer and count storage");
                 if (slot.Submissions > 1)
                     Marshal.Copy(poison, 0, slot.Buffer, poison.Length); // Driver may overwrite immediately after re-arm.
@@ -694,6 +794,7 @@ internal static class Ftd3ReconnectTests
             CancellationDoesNotCloseInFlightRead(); StreamRecovery(); UnchangedBoundsAndLegacyApi(); CloseFailures();
             AudioDoesNotChangeTransport();
             PipelineDeviceCleanupFailures();
+            UnpluggedAcceptedReadsPermitReconnect();
             VariableAudioLengths(); PacketShapeBounds(); CancellationAfterRejectedPacket();
             OtherErrorsAreNotPending();
             PipelineFifoAndOwnership();

@@ -33,14 +33,13 @@ namespace Capture3DS.Cypress
             Info = info;
         }
 
-        public Capture3DSDeviceInfo Info { get; }
+        public Capture3DSDeviceInfo Info { get; private set; }
 
         public static IReadOnlyList<Capture3DSDeviceInfo> ListDevices()
         {
             var devices = new List<Capture3DSDeviceInfo>();
             using (var list = new USBDeviceList(CyConst.DEVICES_CYUSB))
             {
-                var index = 0;
                 foreach (USBDevice usb in list)
                 {
                     var dev = usb as CyUSBDevice;
@@ -60,17 +59,14 @@ namespace Capture3DS.Cypress
                         continue;
                     }
 
-                    index++;
                     var serial = SafeSerial(dev);
-                    if (string.IsNullOrWhiteSpace(serial))
-                    {
-                        serial = $"{dev.BcdDevice:X4}-{index}";
-                    }
+                    var deviceId = BuildDeviceId(dev);
 
                     var description = streaming
                         ? $"LL-SPA3 (CyUSB {dev.VendorID:X4}:{dev.ProductID:X4} bcd={dev.BcdDevice:X4})"
                         : $"LL-SPA3 [要ファーム読込] (CyUSB {dev.VendorID:X4}:{dev.ProductID:X4})";
-                    devices.Add(new Capture3DSDeviceInfo(Capture3DSModel.LlSpa3, serial, description, false));
+                    devices.Add(new Capture3DSDeviceInfo(
+                        Capture3DSModel.LlSpa3, serial, description, false, deviceId));
                 }
             }
 
@@ -97,23 +93,48 @@ namespace Capture3DS.Cypress
             DisposeHandle();
 
             _deviceList = new USBDeviceList(CyConst.DEVICES_CYUSB);
-            _device = FindStreamingDevice(_deviceList, Info.Serial);
-            if (_device == null && ContainsBootDevice(_deviceList))
+            _device = FindStreamingDevice(_deviceList, Info);
+            if (_device == null)
             {
+                var bootDevice = FindBootDevice(_deviceList, Info);
+                if (bootDevice == null)
+                {
+                    throw new Capture3DSException(
+                        "The selected LL-SPA3 device was not found. Re-scan the device list and select it again.");
+                }
+
+                var previousStreamingDevices = SnapshotStreamingDevices(_deviceList);
+
                 // Self-load the cc3dsfs MIT firmware so the board renumerates from
                 // boot mode (04B4:8613) to the streamed device (04B4:1004).
+                var firmware = LlSpa3FirmwareLoader.LoadEmbeddedFirmware();
+                if (!LlSpa3FirmwareLoader.LoadFirmware(bootDevice, firmware, 0))
+                {
+                    throw new Capture3DSException("LL-SPA3 firmware loading failed for the selected device.");
+                }
+
                 _deviceList.Dispose();
                 _deviceList = null;
-                LlSpa3FirmwareLoader.LoadFirmwareToBootDevice();
-                WaitForStreamingDevice(FirmwareRenumerateTimeoutMs);
+                WaitForStreamingDevice(Info, previousStreamingDevices, FirmwareRenumerateTimeoutMs);
                 _deviceList = new USBDeviceList(CyConst.DEVICES_CYUSB);
-                _device = FindStreamingDevice(_deviceList, Info.Serial);
+                _device = FindReenumeratedStreamingDevice(
+                    _deviceList, Info, previousStreamingDevices);
             }
 
             if (_device == null)
             {
                 throw new Capture3DSException("LL-SPA3 streamed device (04B4:1003/1004) was not found through CyUSB, and no boot-mode (04B4:8613) device was available to load firmware.");
             }
+
+			// boot(8613)からstreaming(1004)へ再列挙された場合は、解決後の個体IDを
+			// 呼び出し側へ返す。NXの次回再接続でも同じ個体を選べるようにする。
+			var resolvedSerial = SafeSerial(_device);
+			Info = new Capture3DSDeviceInfo(
+				Capture3DSModel.LlSpa3,
+				resolvedSerial,
+				$"LL-SPA3 (CyUSB {_device.VendorID:X4}:{_device.ProductID:X4} bcd={_device.BcdDevice:X4})",
+				false,
+				BuildDeviceId(_device));
 
             // Optimize New 3DS (bcd 0xFE00) has an EEPROM; the v2 device our
             // firmware self-loads (bcd 0xFA00) does not. The capture_start sequence
@@ -270,64 +291,168 @@ namespace Capture3DS.Cypress
             }
         }
 
-        private static CyUSBDevice FindStreamingDevice(USBDeviceList list, string serial)
+        private static CyUSBDevice FindStreamingDevice(
+            USBDeviceList list,
+            Capture3DSDeviceInfo info)
         {
-            CyUSBDevice fallback = null;
+            CyUSBDevice onlyCandidate = null;
+            var candidateCount = 0;
+            ushort expectedProductId;
+            var hasExpectedProductId = TryGetExpectedProductId(info, out expectedProductId);
             foreach (USBDevice usb in list)
             {
                 var dev = usb as CyUSBDevice;
-                if (dev == null || dev.VendorID != VendorId || !IsStreamingPid(dev.ProductID))
+				if (dev == null || dev.VendorID != VendorId || !IsStreamingPid(dev.ProductID))
                 {
                     continue;
                 }
+				if (hasExpectedProductId && dev.ProductID != expectedProductId)
+				{
+					continue;
+				}
 
-                if (fallback == null)
+                candidateCount++;
+                if (onlyCandidate == null)
                 {
-                    fallback = dev;
+                    onlyCandidate = dev;
                 }
 
-                if (!string.IsNullOrWhiteSpace(serial) && string.Equals(SafeSerial(dev), serial, StringComparison.OrdinalIgnoreCase))
+                if (MatchesDevice(dev, info))
                 {
                     return dev;
                 }
             }
 
-            return fallback;
+            // 旧APIで個体IDなしのInfoを生成した呼び出し元だけは、候補が1台なら
+            // 従来どおり接続できる。複数台時は誤った個体を掴まない。
+			return HasExactSelectionIdentity(info) || candidateCount != 1
+                ? null
+                : onlyCandidate;
         }
 
-        private static bool ContainsBootDevice(USBDeviceList list)
+        private static CyUSBDevice FindBootDevice(
+            USBDeviceList list,
+            Capture3DSDeviceInfo info)
         {
+            CyUSBDevice onlyCandidate = null;
+            var candidateCount = 0;
+            ushort expectedProductId;
+            var hasExpectedProductId = TryGetExpectedProductId(info, out expectedProductId);
             foreach (USBDevice usb in list)
             {
                 var dev = usb as CyUSBDevice;
-                if (dev != null && dev.VendorID == VendorId && dev.ProductID == BootProductId)
+                if (dev == null || dev.VendorID != VendorId || dev.ProductID != BootProductId)
                 {
-                    return true;
+                    continue;
+                }
+				if (hasExpectedProductId && dev.ProductID != expectedProductId)
+				{
+					continue;
+				}
+
+                candidateCount++;
+                if (onlyCandidate == null)
+                {
+                    onlyCandidate = dev;
+                }
+
+                if (MatchesDevice(dev, info))
+                {
+                    return dev;
                 }
             }
 
-            return false;
+			return HasExactSelectionIdentity(info) || candidateCount != 1
+                ? null
+                : onlyCandidate;
         }
 
-        private static void WaitForStreamingDevice(int timeoutMs)
+        private static void WaitForStreamingDevice(
+            Capture3DSDeviceInfo info,
+            HashSet<string> previousStreamingDevices,
+            int timeoutMs)
         {
             var deadline = Environment.TickCount + timeoutMs;
             while (Environment.TickCount < deadline)
             {
                 using (var list = new USBDeviceList(CyConst.DEVICES_CYUSB))
                 {
-                    foreach (USBDevice usb in list)
+                    if (FindReenumeratedStreamingDevice(
+                            list, info, previousStreamingDevices) != null)
                     {
-                        var dev = usb as CyUSBDevice;
-                        if (dev != null && dev.VendorID == VendorId && IsStreamingPid(dev.ProductID))
-                        {
-                            return;
-                        }
+                        return;
                     }
                 }
 
                 System.Threading.Thread.Sleep(150);
             }
+        }
+
+        private static CyUSBDevice FindReenumeratedStreamingDevice(
+            USBDeviceList list,
+            Capture3DSDeviceInfo info,
+            HashSet<string> previousStreamingDevices)
+        {
+            CyUSBDevice newCandidate = null;
+            var newCandidateCount = 0;
+            CyUSBDevice onlyCandidate = null;
+            var candidateCount = 0;
+
+            foreach (USBDevice usb in list)
+            {
+                var dev = usb as CyUSBDevice;
+				// 自己読込したfirmwareは必ず1004として再列挙される。
+				// 待機中に別の1003機器が接続されても対象個体として扱わない。
+				if (dev == null || dev.VendorID != VendorId || dev.ProductID != RunningProductId)
+                {
+                    continue;
+                }
+
+                candidateCount++;
+                if (onlyCandidate == null)
+                {
+                    onlyCandidate = dev;
+                }
+
+                if (MatchesDevice(dev, info))
+                {
+                    return dev;
+                }
+
+                if (!previousStreamingDevices.Contains(SnapshotId(dev)))
+                {
+                    newCandidateCount++;
+                    if (newCandidate == null)
+                    {
+                        newCandidate = dev;
+                    }
+                }
+            }
+
+            if (newCandidateCount == 1)
+            {
+                return newCandidate;
+            }
+
+            // 起動前にストリーミング機が無かった旧API利用時のみ、単独候補を許容する。
+            return previousStreamingDevices.Count == 0 && candidateCount == 1
+                ? onlyCandidate
+                : null;
+        }
+
+        private static HashSet<string> SnapshotStreamingDevices(USBDeviceList list)
+        {
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (USBDevice usb in list)
+            {
+                var dev = usb as CyUSBDevice;
+                if (dev != null && dev.VendorID == VendorId && IsStreamingPid(dev.ProductID))
+                {
+                    result.Add(SnapshotId(dev));
+                }
+            }
+
+            return result;
         }
 
         private static CyBulkEndPoint FindBestBulkIn(CyUSBDevice dev, byte? preferredAddress)
@@ -387,6 +512,112 @@ namespace Capture3DS.Cypress
 
             try { endpoint.Abort(); } catch (IOException) { } catch (InvalidOperationException) { }
             try { endpoint.Reset(); } catch (IOException) { } catch (InvalidOperationException) { }
+        }
+
+		private static bool HasExactSelectionIdentity(Capture3DSDeviceInfo info)
+        {
+            return info != null &&
+				   ((!string.IsNullOrWhiteSpace(info.DeviceId) &&
+					 !info.DeviceId.StartsWith("pid:", StringComparison.OrdinalIgnoreCase)) ||
+                    !string.IsNullOrWhiteSpace(info.Serial));
+        }
+
+		private static bool TryGetExpectedProductId(Capture3DSDeviceInfo info, out ushort productId)
+		{
+			productId = 0;
+			if (info == null || string.IsNullOrWhiteSpace(info.DeviceId)
+				|| !info.DeviceId.StartsWith("pid:", StringComparison.OrdinalIgnoreCase)) return false;
+			return ushort.TryParse(info.DeviceId.Substring(4),
+				System.Globalization.NumberStyles.HexNumber,
+				System.Globalization.CultureInfo.InvariantCulture,
+				out productId);
+		}
+
+        private static bool MatchesDevice(CyUSBDevice dev, Capture3DSDeviceInfo info)
+        {
+            if (dev == null || info == null)
+            {
+                return false;
+            }
+
+			if (HasExactSelectionIdentity(info) &&
+				!string.IsNullOrWhiteSpace(info.DeviceId) &&
+                string.Equals(BuildDeviceId(dev), info.DeviceId, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            return !string.IsNullOrWhiteSpace(info.Serial) &&
+                   string.Equals(SafeSerial(dev), info.Serial, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string BuildDeviceId(CyUSBDevice dev)
+        {
+            // CyUSBのPathは通常
+            // \\?\usb#vid_xxxx&pid_xxxx#<instance>#{driver-guid} の形。
+            // VID/PIDとGUIDを除いたinstance部分は、同じ物理ポート上の8613→1004
+            // 再列挙でも維持され、シリアルを持たない複数台を区別できる。
+            var connectionId = ConnectionIdFromPath(SafePath(dev));
+            if (!string.IsNullOrWhiteSpace(connectionId))
+            {
+                return "path:" + connectionId;
+            }
+
+            var serial = SafeSerial(dev);
+			return string.IsNullOrWhiteSpace(serial)
+				? "pid:" + dev.ProductID.ToString("X4")
+                : "serial:" + serial.Trim();
+        }
+
+        private static string ConnectionIdFromPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return string.Empty;
+            }
+
+            var value = path.Trim();
+            var first = value.IndexOf('#');
+            var second = first < 0 ? -1 : value.IndexOf('#', first + 1);
+            if (second >= 0)
+            {
+                var third = value.IndexOf('#', second + 1);
+                var end = third >= 0 ? third : value.Length;
+                if (end > second + 1)
+                {
+                    return value.Substring(second + 1, end - second - 1);
+                }
+            }
+
+            // 想定外の書式でも、同一列挙中の個体選択にはフルPathを使える。
+            return value;
+        }
+
+        private static string SnapshotId(CyUSBDevice dev)
+        {
+            var path = SafePath(dev);
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                return path.Trim();
+            }
+
+            return $"{dev.VendorID:X4}:{dev.ProductID:X4}:{dev.BcdDevice:X4}:{BuildDeviceId(dev)}";
+        }
+
+        private static string SafePath(CyUSBDevice dev)
+        {
+            try
+            {
+                return dev.Path ?? string.Empty;
+            }
+            catch (IOException)
+            {
+                return string.Empty;
+            }
+            catch (InvalidOperationException)
+            {
+                return string.Empty;
+            }
         }
 
         private static string SafeSerial(CyUSBDevice dev)

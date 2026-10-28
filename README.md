@@ -2,7 +2,7 @@
 
 3DS/DSキャプチャボードの映像と音声を、純正ビューアを起動せずにUSBから直接読み取るC#（.NET Framework 4.8）ライブラリです。キャプチャプロトコルはMITライセンスの[cc3dsfs](https://github.com/Lorenzooone/cc3dsfs)をC#に移植したものです。
 
-フレームは実解像度のRGB8バッファ（上画面・下画面を別々に）で取得でき、上下を縦に並べたモザイク画像や1280x720レターボックス画像への変換ヘルパーも用意しています。
+フレームは実解像度のRGB8バッファ（上画面・下画面を別々に）で取得できます。`ToMosaic()`は拡大・縮小や補間を行わず、上下画面をドットバイドットで縦に並べます。`ToLetterbox720()`は、720p固定の既存パイプラインとの互換用に拡大した画像を生成します。
 
 ## 対応デバイス
 
@@ -13,7 +13,14 @@
 | 3DS LL用キャプチャボード「LL-SPA3」（non-standard.com） | Cypress FX2LP | `Optimize_3DS`移植（CyUSB.NET経由） |
 | Loopy製 初代3DS用キャプチャボード | USB 2.0（VID:PID `16D0:06A3`） | `usb_ds_3ds_capture`移植（libusb経由、実機未検証） |
 
-画面サイズ: 3DSは上400x240/下320x240、DSは256x192が上下2枚。2Dキャプチャのみ対応しています。
+2Dキャプチャ時の実解像度と`ToMosaic()`の出力は次のとおりです。
+
+| 機種 | 上画面 | 下画面 | ドットバイドットの縦結合 |
+|---|---:|---:|---:|
+| 3DS / New 3DS | 400x240 | 320x240 | 400x480（下画面を左右40pxの黒余白で中央配置） |
+| DS | 256x192 | 256x192 | 256x384 |
+
+New 3DSも画面の論理解像度は3DSと同じです。3DS上画面を800x240と表記する資料もありますが、これは立体視用の左右サブピクセルを数えた値で、本ライブラリが扱う2D映像は400x240です。
 
 ## ビルド方法
 
@@ -47,12 +54,14 @@ using (var dev = Capture3DSApi.Open(devices[0]))
     Capture3DSFrame frame = dev.ReadFrame();
 
     // frame.Top / frame.Bottom : RGB8、行優先、1px = 3byte
-    byte[] mosaic = frame.ToMosaic(out int w, out int h);
-    byte[] canvas = frame.ToLetterbox720(); // 1280x720 RGB8
+    byte[] mosaic = frame.ToMosaic(out int w, out int h); // 無拡大の実解像度
+    byte[] canvas = frame.ToLetterbox720();               // 互換用の1280x720 RGB8
 }
 ```
 
 `ListDevices()`はネイティブDLLが見つからないバックエンドを黙ってスキップするので、上記DLLの一部しか無い環境でもそのまま動作します。
+
+`CopyMosaicBgr24To(IntPtr destination, int stride, int bufferLength)`は、`ToMosaic()`と同じ並びをBGR24に直して、呼び出し側が用意したメモリ（`Bitmap.LockBits`で得た領域など）へ直接書き込みます。途中の配列を作らないので、毎フレーム`Bitmap`へ写すときに使えます。
 
 ## USB音声
 
@@ -101,7 +110,7 @@ USB転送が1回失敗しても切断とは扱わず、読み取りを取り消�
 
 ## コマンドラインツール
 
-`CaptureProbe.exe [出力フォルダ] [フレーム数]`はデバイスを列挙し、最初の1台に接続してPNG（上画面/下画面/720pレターボックス）を保存します。
+`CaptureProbe.exe [出力フォルダ] [フレーム数]`はデバイスを列挙し、最初の1台に接続してPNG（上画面/下画面/ドットバイドットの縦結合/互換用720pレターボックス）を保存します。
 
 診断モード:
 
@@ -116,7 +125,7 @@ USB転送が1回失敗しても切断とは扱わず、読み取りを取り消�
 - **純正ビューアは先に終了してください。** キャプチャボードは排他オープンのデバイスなので、`3ds_capture.exe`や`n3DS_view.exe`の起動中は列挙から消えるか、接続に失敗します。
 - **N3DSXL**にはFTDI D3XXドライバ（純正の3ds_captureが使うもの）が必要です。
 - **LL-SPA3**はメーカー純正の`cyusb3`ドライバのままで動きます。Zadig/WinUSBへのドライバ入れ替えも、手動でのファームウェア書き込みも不要です。素のFX2（`04B4:8613`）として認識されている場合は、ライブラリがcc3dsfsのOptimizeファームウェアを自動で転送し、デバイスは`04B4:1004`として再列挙されます。
-- **LL-SPA3のプロダクトキー**: 無くても動作します（キー無しの場合、約260秒ごとに映像の再初期化が入ります）。キーは実行ファイルの隣の`Capture3DS.json`から読み込みます。無い場合でも、n3DS_viewを使ったことがあるPCならそのキャッシュから自動で読み込み、`Capture3DS.json`へ保存します。手動で設定するときはこのJSONを直接編集するか、`Capture3DSApi.SetLlSpa3ProductKey`を呼んでください。
+- **LL-SPA3のプロダクトキー**: 無くても動作します（キー無しの場合、約260秒ごとに映像の再初期化が入ります）。キーは実行ファイルの隣の`Capture3DS.json`から読み込みます。無い場合でも、n3DS_viewを使ったことがあるPCならそのキャッシュから自動で読み込み、`Capture3DS.json`へ保存します。手動で設定するときはこのJSONを直接編集するか、`Capture3DSApi.SetLlSpa3ProductKey`を呼んでください。消すときは`Capture3DSApi.ClearLlSpa3ProductKey`を呼んでください（空の設定を保存し、n3DS_viewのキャッシュから読み直されないようにします）。
 - **Loopy製初代3DS**は、libusbからアクセスできるWindowsドライバと`libusb-1.0.dll`が必要です。ホスト側からのファームウェア転送は行いません。実装はcc3dsfsとCuteCaptureを参照していますが、実機未所持のため動作未検証です。
 
 ## ライセンスと出典

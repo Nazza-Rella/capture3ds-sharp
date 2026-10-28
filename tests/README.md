@@ -34,6 +34,32 @@ This also checks the DS transport's existing pure synchronization-trimming helpe
 against synthetic leading and trailing padding, for 138 assertions per build.
 No device object is constructed, and no native entry point is called.
 
+## Frame-copy tests
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\tests\test-frame-copy.ps1
+powershell -ExecutionPolicy Bypass -File .\tests\test-frame-copy.ps1 -AssemblyPath .\src\Capture3DS\bin\Release\net48\Capture3DS.dll
+```
+
+The default run compiles only `Capture3DSFrame.cs` together with the test harness,
+so CyUSB and the native device libraries are not required. `-AssemblyPath`
+exercises the real built library instead.
+
+`CopyMosaicBgr24To(IntPtr destination, int stride, int bufferLength)` copies into
+caller-owned writable unmanaged memory. It does not retain the pointer or create a
+`Bitmap`. The output is the same native-resolution, centered vertical layout as
+`ToMosaic`, with RGB changed to BGR. Image side margins are black; row padding
+remains untouched. Only positive stride is supported. The caller must keep the
+destination valid, must not overlap source arrays with it, and must not modify
+those arrays concurrently.
+
+The tests compare every output byte with the existing RGB mosaic, including
+unequal screen widths/heights, zero-sized screens, odd strides, minimum buffer
+sizes, padding and guard bytes. Invalid input must be rejected before writing.
+Where the runtime exposes a per-thread allocation counter, repeated valid copies
+are also checked for zero managed allocation. This is a conversion-only test,
+not an end-to-end device latency benchmark.
+
 ## N3DSXL queued-read and lifecycle tests
 
 ```powershell

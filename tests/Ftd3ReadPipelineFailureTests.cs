@@ -41,7 +41,7 @@ namespace Capture3DS.Ftd3
         internal static readonly Dictionary<IntPtr, Entry> Entries = new Dictionary<IntPtr, Entry>();
         internal static int InitializeCalls, SubmitCalls, QueryCalls, ReleaseCalls;
         internal static int InitFailure, ReleaseFailure, SubmitThrow, SubmitStatus, QueryStatus;
-        internal static bool ReleaseFailedOnce;
+        internal static bool ReleaseFailedOnce, QueryCompletesUnknown;
         internal static Action<string, int> After;
 
         internal static void Reset()
@@ -54,6 +54,7 @@ namespace Capture3DS.Ftd3
             SubmitStatus = FT_IO_PENDING;
             QueryStatus = 0;
             ReleaseFailedOnce = false;
+            QueryCompletesUnknown = false;
             After = null;
         }
 
@@ -86,7 +87,8 @@ namespace Capture3DS.Ftd3
             SubmitCalls++;
             entry.Buffer = buffer;
             entry.Count = count;
-            entry.Pending = true;
+            entry.Pending = SubmitStatus == FT_IO_PENDING || SubmitStatus == FT_IO_INCOMPLETE || entry.Index == SubmitThrow;
+            Marshal.WriteIntPtr(pointer, new IntPtr(entry.Pending ? 0x103 : 0));
             Marshal.WriteInt32(count, 0);
             for (int i = 0; i < 64; i++) Marshal.WriteByte(buffer, i, (byte)entry.Index);
             if (After != null) After("submit", entry.Index);
@@ -103,10 +105,12 @@ namespace Capture3DS.Ftd3
             QueryCalls++;
             int status = QueryStatus;
             transferred = status == 0 ? 64u : 0u;
-            if (status == 0 || status == 19 || status == 20 || status == 30)
+            if (status == 0 || status == 19 || status == 20 || status == 30 || (status == 32 && QueryCompletesUnknown))
             {
                 entry.Pending = false;
                 Marshal.WriteInt32(entry.Count, (int)transferred);
+                Marshal.WriteIntPtr(pointer, status == 0 ? IntPtr.Zero : new IntPtr(unchecked((int)0xc000009d)));
+                entry.Event.Set();
             }
             if (After != null) After("query", entry.Index);
             return status;
@@ -270,6 +274,43 @@ internal static class Ftd3ReadPipelineFailureTests
         }
     }
 
+    private static void UnplugCompletionAndRejectedSubmission()
+    {
+        var pipeline = NewPipeline();
+        Ftd3Native.QueryStatus = 32;
+        Ftd3Native.QueryCompletesUnknown = true;
+        Throws<Capture3DS.Capture3DSException>(() => pipeline.Read(new byte[64], CancellationToken.None));
+        Check(Ftd3Native.SubmitCalls == 12, "Unplug error was delivered as a frame or resubmitted.");
+        pipeline.Dispose();
+        Storage(pipeline, true);
+        ReleasedExactly(12);
+        cases++;
+
+        // The query can first fail while the Win32 request is still pending.
+        pipeline = NewPipeline();
+        Ftd3Native.QueryStatus = 32;
+        Ftd3Native.After = (kind, slot) =>
+        {
+            if (kind == "query" && Ftd3Native.QueryCalls == 2) Ftd3Native.QueryCompletesUnknown = true;
+        };
+        Throws<Capture3DS.Capture3DSException>(() => pipeline.Read(new byte[64], CancellationToken.None));
+        Check(Ftd3Native.QueryCalls == 3, "Did not wait for the native unplug completion.");
+        pipeline.Dispose();
+        Storage(pipeline, true);
+        ReleasedExactly(12);
+        cases++;
+
+        // A synchronous submission failure did not start an overlapped request.
+        pipeline = NewPipeline();
+        Ftd3Native.SubmitStatus = 32;
+        Throws<Capture3DS.Capture3DSException>(() => pipeline.Read(new byte[64], CancellationToken.None));
+        pipeline.Dispose();
+        Check(Ftd3Native.QueryCalls == 0, "Queried an unplugged submission that was never accepted.");
+        Storage(pipeline, true);
+        ReleasedExactly(12);
+        cases++;
+    }
+
     private static void CancellationBoundaries()
     {
         foreach (string boundary in new[] { "initialize", "submit" })
@@ -342,7 +383,7 @@ internal static class Ftd3ReadPipelineFailureTests
 
     private static void AmbiguousSubmissionRetainsStorage()
     {
-        foreach (int status in new[] { 25, 32 })
+        foreach (int status in new[] { 25 })
         {
             var pipeline = NewPipeline();
             Ftd3Native.SubmitStatus = status;
@@ -383,6 +424,7 @@ internal static class Ftd3ReadPipelineFailureTests
         {
             PartialInitializeFailures();
             TerminalErrors();
+            UnplugCompletionAndRejectedSubmission();
             UnknownCompletionRetainsOwnership();
             ReleaseFailuresAreRetryable();
             CancellationBoundaries();

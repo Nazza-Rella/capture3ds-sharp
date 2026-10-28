@@ -15,6 +15,8 @@ namespace Capture3DS.Ftd3
     {
         internal const int SlotCount = 12;
         private const int CompletionDeadlineMs = 2500;
+        private const int OtherError = 32;
+        private const uint StatusPending = 0x103;
         private readonly IntPtr handle;
         private readonly byte pipe;
         private readonly int bufferSize;
@@ -26,7 +28,7 @@ namespace Capture3DS.Ftd3
         {
             internal IntPtr Buffer, Overlapped, Count;
             internal WaitHandle CompletionEvent;
-            internal bool Initialized, Pending;
+            internal bool Initialized, Pending, AcceptedPending;
             internal uint Transferred;
         }
 
@@ -83,6 +85,7 @@ namespace Capture3DS.Ftd3
             cancellationToken.ThrowIfCancellationRequested();
             if (slot.Pending) throw new InvalidOperationException("Cannot reuse an in-flight USB read.");
             Marshal.WriteInt32(slot.Count, 0);
+            slot.AcceptedPending = false;
             // Conservatively retain the storage if a native invocation throws.
             slot.Pending = true;
             int status = Ftd3Native.FT_ReadPipeAsync(handle, pipe, slot.Buffer,
@@ -92,12 +95,18 @@ namespace Capture3DS.Ftd3
                 slot.Transferred = unchecked((uint)Marshal.ReadInt32(slot.Count));
                 slot.Pending = false;
             }
-            else if (status != Ftd3Native.FT_IO_PENDING)
+            else if (status == Ftd3Native.FT_IO_PENDING)
             {
-                // Ordinary submission failures have not accepted a request.
-                // 25 (incomplete) and 32 (catch-all unknown native error) do not
-                // establish that guarantee; let shutdown confirm their result.
-                slot.Pending = status == Ftd3Native.FT_IO_INCOMPLETE || status == 32;
+                slot.AcceptedPending = true;
+            }
+            else
+            {
+                // FT_ReadPipe forwards DeviceIoControl's asynchronous result.
+                // A non-pending submission error (including unplug/OTHER_ERROR)
+                // has not left an accepted request outstanding. Do not confuse
+                // that with OTHER_ERROR when querying an already accepted read.
+                // Keep the anomalous IO_INCOMPLETE case conservative.
+                slot.Pending = status == Ftd3Native.FT_IO_INCOMPLETE;
                 cancellationToken.ThrowIfCancellationRequested();
                 throw new Capture3DSException($"FT_ReadPipe asynchronous submit failed: 0x{status:X}");
             }
@@ -112,22 +121,32 @@ namespace Capture3DS.Ftd3
                 uint transferred;
                 int status = Ftd3Native.FT_GetOverlappedResult(handle, slot.Overlapped, out transferred, false);
                 bool completed = status == Ftd3Native.FT_OK || status == 19 || status == 20 || status == 30;
+                // D3XX maps some completed unplug errors to FT_OTHER_ERROR.
+                // Use the Win32 HasOverlappedIoCompleted condition ONLY for an
+                // operation accepted with FT_IO_PENDING. An unsubmitted or
+                // ambiguously submitted OVERLAPPED can still contain zero (or
+                // a previous result), which is not evidence of completion.
+                if (!completed && status == OtherError && slot.AcceptedPending)
+                    completed = unchecked((uint)Marshal.ReadIntPtr(slot.Overlapped).ToInt64()) != StatusPending;
                 if (completed)
                 {
-                    slot.Transferred = transferred;
+                    slot.Transferred = status == Ftd3Native.FT_OK ? transferred : 0;
                     slot.Pending = false;
+                    slot.AcceptedPending = false;
                 }
                 // Preserve the native ownership outcome before observing stop;
                 // cancellation then wins over an error returned at that boundary.
                 cancellationToken.ThrowIfCancellationRequested();
                 if (status != Ftd3Native.FT_IO_PENDING && status != Ftd3Native.FT_IO_INCOMPLETE)
                 {
-                    // These statuses are completed Win32 I/O results in D3XX.
-                    // Unknown/invalid-handle/query errors are NOT proof that the
-                    // kernel has stopped using this slot: retain it on failure.
-                    if (!completed)
+                    // A completed error is still an error to Read(), but Dispose
+                    // can now drain the remaining slots and release the device.
+                    if (completed) return status;
+                    // On unplug, the query can fail just before Windows marks
+                    // the request complete. Allow the same bounded wait for that
+                    // transition; never free storage based on FT_OTHER_ERROR alone.
+                    if (status != OtherError || !slot.AcceptedPending)
                         throw new Capture3DSException($"Cannot confirm N3DS USB completion: 0x{status:X}; native storage is retained.");
-                    return status;
                 }
                 if (deadline.ElapsedMilliseconds >= CompletionDeadlineMs)
                     throw new Capture3DSException("Timed out waiting for an N3DS USB read to finish; its native storage is retained.");

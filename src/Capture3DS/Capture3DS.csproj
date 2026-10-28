@@ -5,6 +5,7 @@
          whole library targets net48. All consumers (NX, CaptureProbe) are net48. -->
     <TargetFramework>net48</TargetFramework>
     <LangVersion>9.0</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>Capture3DS</AssemblyName>
     <RootNamespace>Capture3DS</RootNamespace>
     <Nullable>disable</Nullable>

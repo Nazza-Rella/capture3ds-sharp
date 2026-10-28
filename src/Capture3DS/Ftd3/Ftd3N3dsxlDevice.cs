@@ -28,14 +28,12 @@ namespace Capture3DS.Ftd3
         private const int ConnectAttempts = 3;
         private const int ConnectRetrySleepMs = 150;
 
-        // 2D サイズ(ponkan protocol/sizes と一致)
+        // USB capacity matches official 3ds_capture 6.1 (0xD0000); actual
+        // frame/audio lengths remain independently bounded below/in the decoder.
         private const int VideoSize2D = N3dsxlDecoder.VideoSize2D; // 518400
-        private const int AudioSize = 1096 * 16 * 2;               // 35072
-        private const int UnusedBuffer = 1024;
-        private const int ErrorBuffer = 1024;
-        private const int AlignBytes = 1024;
-        private static readonly int CaptureSize2D =
-            ((VideoSize2D + AudioSize + UnusedBuffer + ErrorBuffer) / AlignBytes) * AlignBytes; // 555008
+        private const int CaptureSize2D = 0xD0000; // 851968
+        // Preserve the decoder's payload ceiling, not USB capacity minus padding.
+        private const int MaxNonErrorSize2D = 555008 - 1024; // 553984
         private static readonly string[] ValidDescriptions = { "N3DSXL", "N3DSXL.2" };
 
         private const int RawFrameReadAttempts = 16;
@@ -229,7 +227,7 @@ namespace Capture3DS.Ftd3
         /// 診断用: 1 回の FT_ReadPipe(CaptureSize2D)を行い、デコードせず転送長を返す。
         /// 一過性(0x18/0x19)はパイプを張り直して 0 を返す(その読みは無効)。
         /// 正常な短パケット終端の転送長も、そのフレームに含まれる音声サンプル数で変化する。
-        /// 毎回 CaptureSize2D=555008 が返るなら、フレーム境界で区切れず連結読み=整列崩れ。
+        /// 毎回 CaptureSize2D=851968 が返るなら、フレーム境界で区切れず連結読み=整列崩れ。
         /// </summary>
         public uint ReadRawTransferSize()
         {
@@ -251,7 +249,7 @@ namespace Capture3DS.Ftd3
 
         /// <summary>診断用の参照値(映像分/転送上限/error 手前の上限)。</summary>
         public static (int videoSize, int captureSize, int maxNonError) DiagnosticSizes()
-            => (VideoSize2D, CaptureSize2D, CaptureSize2D - ErrorBuffer);
+            => (VideoSize2D, CaptureSize2D, MaxNonErrorSize2D);
 
         /// <summary>
         /// 診断用: 1 回だけ FT_ReadPipe して転送長を out で返し、有効ならデコードして返す。

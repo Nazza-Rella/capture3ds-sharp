@@ -118,9 +118,16 @@ namespace Capture3DS.Cypress
             key = null;
             source = null;
 
-            if (TryLoadProductKeyFromJson(out key, out source))
+            bool explicitlyCleared;
+            if (TryLoadProductKeyFromJsonCore(out key, out source, out explicitlyCleared))
             {
                 return true;
+            }
+
+            // 空のキーが明示的に保存されている場合は、リセット後に旧VROMから復活させない。
+            if (explicitlyCleared)
+            {
+                return false;
             }
 
             // 初回はn3DS_viewが残したEEPROMキャッシュから拾い、以後JSONだけで済むよう保存する。
@@ -145,8 +152,16 @@ namespace Capture3DS.Cypress
 
         public static bool TryLoadProductKeyFromJson(out string key, out string source)
         {
+            bool explicitlyCleared;
+            return TryLoadProductKeyFromJsonCore(out key, out source, out explicitlyCleared);
+        }
+
+        private static bool TryLoadProductKeyFromJsonCore(
+            out string key, out string source, out bool explicitlyCleared)
+        {
             key = null;
             source = null;
+            explicitlyCleared = false;
             var path = ProductKeyJsonPath();
             if (!File.Exists(path))
             {
@@ -169,7 +184,19 @@ namespace Capture3DS.Cypress
 
             var match = System.Text.RegularExpressions.Regex.Match(
                 text, "\"llspa3ProductKey\"\\s*:\\s*\"([^\"]*)\"");
-            if (!match.Success || !TryFindKeyInText(match.Groups[1].Value, out key))
+            if (!match.Success)
+            {
+                return false;
+            }
+
+            var savedValue = match.Groups[1].Value;
+            if (string.IsNullOrWhiteSpace(savedValue))
+            {
+                explicitlyCleared = true;
+                return false;
+            }
+
+            if (!TryFindKeyInText(savedValue, out key))
             {
                 return false;
             }
@@ -189,6 +216,24 @@ namespace Capture3DS.Cypress
             {
                 File.WriteAllText(ProductKeyJsonPath(),
                     "{\r\n  \"llspa3ProductKey\": \"" + normalized + "\"\r\n}\r\n", Encoding.UTF8);
+                return true;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
+        public static bool TryClearProductKeyFromJson()
+        {
+            try
+            {
+                File.WriteAllText(ProductKeyJsonPath(),
+                    "{\r\n  \"llspa3ProductKey\": \"\"\r\n}\r\n", Encoding.UTF8);
                 return true;
             }
             catch (IOException)
